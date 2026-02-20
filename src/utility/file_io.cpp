@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,7 +20,9 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#include "io/file_io.h"
+#include "utility/file_io.h"
+
+#include "utility/platform.h"
 
 #include <cerrno>
 #include <cstring>
@@ -106,7 +108,7 @@ uint64_t FileIOReadRaw::read(std::byte* buffer, uint64_t size)
     return 0;
 }
 
-bool FileIOReadRaw::readToBuffer(utility::DataBuffer& buffer, const std::string& filename)
+bool FileIOReadRaw::readToBuffer(utility::DataBuffer& buffer, const std::filesystem::path& filename)
 {
     FileIORead file = FileIORead(filename);
     if (!file.isValid()) {
@@ -160,7 +162,8 @@ int FileIOWriteRaw::flush()
     return 0;
 }
 
-bool FileIOWriteRaw::writeFromBuffer(const std::byte* buffer, uint64_t size, const std::string& filename)
+bool FileIOWriteRaw::writeFromBuffer(const std::byte* buffer, uint64_t size,
+                                     const std::filesystem::path& filename)
 {
     FileIOWrite file = FileIOWrite(filename);
 

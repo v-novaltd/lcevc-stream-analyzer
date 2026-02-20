@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,23 +23,23 @@
 #ifndef VN_EXTRACTOR_EXTRACTOR_BIN_H_
 #define VN_EXTRACTOR_EXTRACTOR_BIN_H_
 
-#include "bin/lcevc_bin.h"
 #include "extractor.h"
-#include "helper/frame_queue.h"
+#include "helper/extracted_frame.h"
+#include "helper/lcevc_bin.h"
 
 namespace vnova::analyzer {
 class ExtractorBin : public Extractor
 {
 public:
-    ExtractorBin(const std::string& url, InputType type);
+    ExtractorBin(const std::filesystem::path& url, helper::InputType type);
     ~ExtractorBin();
 
-    bool next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBuffer) override;
+    bool next(std::vector<helper::LCEVCFrame>& lcevcFrames, helper::BaseFrameQueue& frameQueue) override;
 
 private:
-    utility::LCEVCBinReader m_reader;
-    utility::LCEVCBinBlock m_block;
-    utility::LCEVCBinLCEVCPayload m_payload;
+    helper::bin::LCEVCBinReader m_reader;
+    helper::bin::LCEVCBinBlock m_block;
+    helper::bin::LCEVCBinLCEVCPayload m_payload;
 };
 
 } // namespace vnova::analyzer

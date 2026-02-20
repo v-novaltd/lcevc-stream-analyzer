@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,145 +20,463 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#include "extractor_demuxer.h"
+#include "utility/platform.h"
+// platform.h first to avoid min/max macro Windows issue.
 
-#include "libavformat/avformat.h"
-#include "utility/base_type.h"
+#include "extractor_demuxer.h"
+#include "helper/base_type.h"
+#include "helper/nal_unit.h"
 #include "utility/byte_order.h"
 #include "utility/log_util.h"
-#include "utility/nal_header.h"
-#include "utility/nal_unit.h"
+#include "utility/platform.h"
+#include "utility/span.h"
 
-#include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <fstream>
+#include <optional>
 
 using namespace vnova::utility;
+using namespace vnova::helper;
 
 namespace vnova::analyzer {
-static constexpr int kLCEVCCodec = 54;
-static constexpr int kBlockAdditionalLcevcId = 5;
-static constexpr int64_t kInvalidPts = (std::numeric_limits<int64_t>::max)();
 
-template <typename T>
-bool readBE(const uint8_t*& data, size_t& size, T& value)
-{
-    if (size < sizeof(T)) {
-        return false;
-    }
+namespace {
 
-    T rawValue;
-    std::memcpy(&rawValue, data, sizeof(T));
-    value = ByteOrder<T>::toHost(rawValue);
-
-    data += sizeof(T);
-    size -= sizeof(T);
-    return true;
-}
-
-void fixMisclassifiedStreams(AVFormatContext& formatContext)
-{
-    for (unsigned int i = 0; i < formatContext.nb_streams; ++i) {
-        AVStream* stream = formatContext.streams[i];
-        AVCodecParameters* codecPar = stream->codecpar;
-
-        if (codecPar->codec_tag == kLCEVCCodec) {
-            codecPar->codec_id = AV_CODEC_ID_NONE;
-            codecPar->codec_type = AVMEDIA_TYPE_VIDEO;
+    void avFrameDeleter(AVFrame* frame)
+    {
+        if (frame) {
+            av_frame_free(&frame);
         }
     }
-}
+    using AVFramePtr = std::unique_ptr<AVFrame, decltype(&avFrameDeleter)>;
 
-bool ExtractorDemuxer::parseLvcCAtom(const uint8_t* data, size_t size, LCEVCDecoderConfiguration& config)
-{
-    size_t offset = 0;
-    size_t length = size;
-    if (length < 15) {
-        return false;
-    }
+    class PacketMeta
+    {
+    public:
+        struct Data
+        {
+            int64_t decodeIndex;
+            int flags;
+            int64_t dts;
+        };
 
-    const uint8_t* ptr = nullptr;
+        static void Free(void* /*opaque*/, uint8_t* data) { av_free(data); }
 
-    config.configurationVersion = data[offset++];
-    config.lcevcProfileIndication = data[offset++];
-    config.lcevcLevelIndication = data[offset++];
+        static int Attach(AVPacket* pkt, const int64_t decodeIndex)
+        {
+            auto* meta = static_cast<Data*>(av_mallocz(sizeof(Data)));
+            if (!meta) {
+                return AVERROR(ENOMEM);
+            }
 
-    uint8_t byte = data[offset++];
-    config.chromaFormatIdc = (byte >> 6) & 0x03;
-    if (config.chromaFormatIdc > 3) {
-        return false;
-    }
+            meta->decodeIndex = decodeIndex;
+            meta->flags = pkt->flags;
+            meta->dts = pkt->dts;
 
-    config.bitDepthLuma = ((byte >> 3) & 0x07) + 8;
-    config.bitDepthChroma = (byte & 0x07) + 8;
+            auto* data = static_cast<void*>(meta);
+            AVBufferRef* ref =
+                av_buffer_create(static_cast<uint8_t*>(data), sizeof(*meta), Free, nullptr, 0);
+            if (!ref) {
+                av_free(meta);
+                return AVERROR(ENOMEM);
+            }
 
-    byte = data[offset++];
-    config.lengthSize = ((byte >> 6) & 0x03) + 1;
+            // Any previous opaque_ref should be replaced/unref'd.
+            av_buffer_unref(&pkt->opaque_ref);
+            pkt->opaque_ref = ref;
+            return 0;
+        }
 
-    ptr = data + offset;
-    readBE(ptr, size, config.picWidthInLumaSamples);
-    offset += 4;
+        static std::optional<Data> Retrieve(const AVFrame* frame)
+        {
+            if (frame->opaque_ref) {
+                // Horrible opaque cast from void* is needed here.
+                // NOLINTNEXTLINE(bugprone-casting-through-void)
+                const auto* meta = static_cast<Data*>(static_cast<void*>(frame->opaque_ref->data));
+                return std::make_optional<Data>(*meta);
+            }
+            return std::nullopt;
+        }
+    };
 
-    ptr = data + offset;
-    readBE(ptr, size, config.picHeightInLumaSamples);
-    offset += 4;
-
-    byte = data[offset++];
-    config.scInStream = (byte >> 7) & 0x01;
-    config.gcInStream = (byte >> 6) & 0x01;
-    config.aiInStream = (byte >> 5) & 0x01;
-
-    config.numOfArrays = data[offset++];
-
-    for (uint8_t j = 0; j < config.numOfArrays; ++j) {
-        if (offset + 2 > length) {
+    template <typename T>
+    bool readBE(const uint8_t*& data, size_t& size, T& value)
+    {
+        if (size < sizeof(T)) {
             return false;
         }
 
+        T rawValue;
+        std::memcpy(&rawValue, data, sizeof(T));
+        value = ByteOrder<T>::ToHost(rawValue);
+
+        data += sizeof(T);
+        size -= sizeof(T);
+        return true;
+    }
+
+    void fixMisclassifiedStreams(AVFormatContext const & formatContext)
+    {
+        for (unsigned int i = 0; i < formatContext.nb_streams; ++i) {
+            AVStream* stream = formatContext.streams[i];
+            AVCodecParameters* codecPar = stream->codecpar;
+
+            if (codecPar->codec_tag == kLCEVCCodec) {
+                codecPar->codec_id = AV_CODEC_ID_NONE;
+                codecPar->codec_type = AVMEDIA_TYPE_VIDEO;
+            }
+        }
+    }
+
+    std::optional<double> rationalToDouble(const AVRational& rational)
+    {
+        if (rational.den <= 0) {
+            return std::nullopt;
+        }
+        return static_cast<double>(rational.num) / static_cast<double>(rational.den);
+    }
+
+    std::optional<double> validateFramerate(const AVRational& guessedFramerate)
+    {
+        const bool invalidGuess = guessedFramerate.num == 0 && guessedFramerate.den == 1;
+        return invalidGuess ? std::nullopt : rationalToDouble(guessedFramerate);
+    }
+
+    std::optional<double> guessFramerate(AVFormatContext* context,
+                                         const AVCodecParameters* codecPar, AVStream* stream)
+    {
+        if (auto framerate = validateFramerate(av_guess_frame_rate(context, stream, nullptr));
+            framerate.has_value()) {
+            return framerate;
+        }
+
+        if (auto framerate = validateFramerate(stream->avg_frame_rate); framerate.has_value()) {
+            return framerate;
+        }
+
+        if (auto framerate = validateFramerate(codecPar->framerate); framerate.has_value()) {
+            return framerate;
+        }
+
+        VNLOG_WARN("Failed to guess framerate");
+        return std::nullopt;
+    }
+
+    std::optional<double> guessTimebase(const AVFormatContext*, const AVCodecParameters*,
+                                        const AVStream* stream)
+    {
+        if (auto timebase = validateFramerate(stream->time_base); timebase.has_value()) {
+            return timebase;
+        }
+
+        VNLOG_WARN("Failed to guess timebase");
+        return std::nullopt;
+    }
+
+    bool parseLvcCAtom(const uint8_t* data, size_t size, LCEVCDecoderConfiguration& config)
+    {
+        size_t offset = 0;
+        size_t length = size;
+        if (length < 15) {
+            return false;
+        }
+
+        const uint8_t* ptr = nullptr;
+
+        config.configurationVersion = data[offset++];
+        config.lcevcProfileIndication = data[offset++];
+        config.lcevcLevelIndication = data[offset++];
+
+        uint8_t byte = data[offset++];
+        config.chromaFormatIdc = (byte >> 6) & 0x03;
+        if (config.chromaFormatIdc > 3) {
+            return false;
+        }
+
+        config.bitDepthLuma = ((byte >> 3) & 0x07) + 8;
+        config.bitDepthChroma = (byte & 0x07) + 8;
+
         byte = data[offset++];
-        uint8_t nalUnitType = byte & 0x3F;
+        config.lengthSize = ((byte >> 6) & 0x03) + 1;
 
-        uint16_t numOfNalus = 0;
         ptr = data + offset;
-        readBE(ptr, size, numOfNalus);
-        offset += 2;
+        readBE(ptr, size, config.picWidthInLumaSamples);
+        offset += 4;
 
-        NALArray array;
-        array.nalUnitType = nalUnitType;
+        ptr = data + offset;
+        readBE(ptr, size, config.picHeightInLumaSamples);
+        offset += 4;
 
-        for (int i = 0; i < numOfNalus; ++i) {
+        byte = data[offset++];
+        config.scInStream = (byte >> 7) & 0x01;
+        config.gcInStream = (byte >> 6) & 0x01;
+        config.aiInStream = (byte >> 5) & 0x01;
+
+        config.numOfArrays = data[offset++];
+
+        for (uint8_t j = 0; j < config.numOfArrays; ++j) {
             if (offset + 2 > length) {
                 return false;
             }
 
-            uint16_t nalUnitLength = 0;
+            byte = data[offset++];
+            uint8_t nalUnitType = byte & 0x3F;
+
+            uint16_t numOfNalus = 0;
             ptr = data + offset;
-            readBE(ptr, size, nalUnitLength);
+            readBE(ptr, size, numOfNalus);
             offset += 2;
-            if (offset + nalUnitLength > length) {
-                return false;
+
+            NALArray array;
+            array.nalUnitType = nalUnitType;
+
+            for (int i = 0; i < numOfNalus; ++i) {
+                if (offset + 2 > length) {
+                    return false;
+                }
+
+                uint16_t nalUnitLength = 0;
+                ptr = data + offset;
+                readBE(ptr, size, nalUnitLength);
+                offset += 2;
+                if (offset + nalUnitLength > length) {
+                    return false;
+                }
+
+                NALUnit unit;
+                unit.nalUnitLength = nalUnitLength;
+                unit.nalUnit.insert(unit.nalUnit.end(), data + offset, data + offset + nalUnitLength);
+                offset += nalUnitLength;
+
+                array.nalUnits.push_back(unit);
             }
 
-            NALUnit unit;
-            unit.nalUnitLength = nalUnitLength;
-            unit.nalUnit.insert(unit.nalUnit.end(), data + offset, data + offset + nalUnitLength);
-            offset += nalUnitLength;
-
-            array.nalUnits.push_back(unit);
+            config.arrays.push_back(array);
         }
 
-        config.arrays.push_back(array);
+        return true;
     }
 
-    return true;
-}
+    FrameType toFrameType(const AVPictureType& pic)
+    {
+        switch (pic) {
+            case AVPictureType::AV_PICTURE_TYPE_I: return FrameType::I;
+            case AVPictureType::AV_PICTURE_TYPE_B: return FrameType::B;
+            case AVPictureType::AV_PICTURE_TYPE_P: return FrameType::P;
+            default: return FrameType::Unknown;
+        }
+    }
 
-ExtractorDemuxer::ExtractorDemuxer(const std::string& url, InputType type, const Config& config)
+    FrameType resolveFrameType(const AVCodecContext& codecCtx, const AVFrame* frame, const int flags)
+    {
+        switch (codecCtx.codec_id) {
+            case AV_CODEC_ID_VP9:
+            case AV_CODEC_ID_AV1: [[fallthrough]];
+            case AV_CODEC_ID_VP8:
+                return (flags & AV_PKT_FLAG_KEY) ? FrameType::KeyFrame : FrameType::InterFrame;
+            default: return frame ? toFrameType(frame->pict_type) : FrameType::Unknown;
+        }
+    }
+
+    void dumpAVPacket(const AVPacket* packet, const std::filesystem::path& dir)
+    {
+        constexpr const char* fmt = "dts%08" PRId64 ".pts%08" PRId64 ".bin";
+        std::string filename;
+
+        const size_t strLength =
+            snprintf(nullptr, 0, fmt, packet->pts, packet->dts != kInvalidDts ? packet->dts : 0);
+        filename.resize(strLength + 1);
+        snprintf(filename.data(), filename.size(), fmt, packet->pts,
+                 packet->dts != kInvalidDts ? packet->dts : 0);
+
+        std::ofstream out(dir / filename, std::ios::binary);
+        if (!out) {
+            throw vnova::utility::file::FileError("Failed to open bin dump file");
+        }
+
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        out.write(reinterpret_cast<const char*>(packet->data), packet->size);
+    }
+
+    class NALScanResult
+    {
+    public:
+        NALScanResult(const helper::BaseType& codec, const bool isAnnexB,
+                      const helper::ParsedNALHeader& header, const size_t location)
+            : m_codec(codec)
+            , m_header(header)
+            , m_location(location)
+            , m_isAnnexB(isAnnexB)
+        {}
+
+        void Parse(const uint8_t* bufferData, const size_t bufferSize, const size_t nalSize)
+        {
+            // Ignore header
+            const uint8_t* bufferLocation = bufferData + m_location;
+            size_t bufferRemaining = bufferSize - m_location;
+            size_t nalRemaining = nalSize;
+
+            uint32_t seiHeaderSize = 0;
+            if (isSEINALUnit(m_codec, bufferLocation, bufferRemaining, seiHeaderSize) == false) {
+                m_isParsed = true;
+                return;
+            }
+
+            bufferLocation += seiHeaderSize;
+
+            nalRemaining -= seiHeaderSize;
+
+            // Unencapsulate the data into a destination buffer. The destination
+            // is required to be as big as encapsulated data, unencapsulation will
+            // never expand the number of bytes only contract.
+            utility::DataBuffer unencapsulatedNal(nalSize, 0);
+
+            const uint32_t dataLength =
+                helper::nalUnencapsulate(unencapsulatedNal.data(), bufferLocation, nalRemaining);
+            VNAssert(dataLength <= nalSize);
+
+            const uint8_t* dataPtr = unencapsulatedNal.data();
+            const uint8_t* dataEnd = dataPtr + dataLength;
+
+            while (dataPtr < dataEnd) {
+                const auto payloadType = std::byte{*dataPtr++};
+
+                size_t payloadSize = 0;
+                while (*dataPtr == 0xFF) {
+                    payloadSize += 0xFF;
+                    dataPtr++;
+                }
+                payloadSize += *dataPtr++;
+
+                m_seiPayloads += 1;
+
+                if ((payloadType == helper::kRegisterUserDataSEIType.at(0)) &&
+                    (payloadSize >= helper::kLCEVCITUHeader.size()) &&
+                    helper::isLCEVCITUPayload(dataPtr)) {
+                    m_lcevcSeiPayloads += 1;
+                }
+
+                dataPtr += payloadSize;
+            }
+
+            m_isParsed = true;
+        }
+
+        static size_t PrintAll(const uint8_t* bufferData, const size_t bufferSize,
+                               std::vector<NALScanResult>& results, const std::vector<size_t>& offsets)
+        {
+            if (offsets.size() != results.size() + 1) {
+                throw std::runtime_error("Offsets must be 1 longer than headers, where the size of "
+                                         "the packet is the last value.");
+            }
+
+            size_t accumulatedSize = 0;
+
+            for (size_t index = 0; index < results.size(); index++) {
+                auto& result = results.at(index);
+                const size_t size = offsets.at(index + 1) - offsets.at(index);
+                result.Parse(bufferData, bufferSize, size);
+                result.Print(index, size);
+
+                accumulatedSize += size;
+            }
+            return accumulatedSize;
+        }
+
+    private:
+        helper::BaseType m_codec;
+        helper::ParsedNALHeader m_header;
+        size_t m_location;
+        bool m_isAnnexB;
+
+        bool m_isParsed = false;
+
+        size_t m_seiPayloads = 0;
+        size_t m_lcevcSeiPayloads = 0;
+
+        void Print(const size_t index, const size_t nalLength) const
+        {
+            if (m_isParsed) {
+                VNLOG_INFO("    nal:%2d - %10s (%3d)   nal_length:%d is_annex_b:%d n_sei:%d "
+                           "n_lcevc_sei:%d",
+                           index, toString(m_header.nalUnitValue, m_codec), m_header.nalUnitValue,
+                           nalLength, m_isAnnexB, m_seiPayloads, m_lcevcSeiPayloads);
+            } else {
+                VNLOG_ERROR("Tried to print unparsed NALScanResult");
+            }
+        }
+    };
+
+    void scanAnnexBNalUnits(const AVPacket* packet, int streamIndex, const helper::BaseType& codec)
+    {
+        const auto* location = packet->data;
+        int remaining = packet->size;
+
+        std::vector<NALScanResult> results;
+        std::vector<size_t> locations;
+
+        VNLOG_INFO("stream:%2d dts:%10d pts:%10d size: %10d", streamIndex, packet->dts, packet->pts,
+                   packet->size);
+
+        while (remaining) {
+            if (helper::ParsedNALHeader header; parseAnnexBHeader(location, remaining, codec, header)) {
+                results.emplace_back(codec, true, header, location - packet->data);
+                locations.push_back(location - packet->data);
+
+                location += header.headerSize;
+                remaining -= static_cast<int>(header.headerSize);
+
+            } else {
+                location += 1;
+                remaining -= 1;
+            }
+        }
+        locations.push_back(packet->size);
+
+        const size_t runningSize = NALScanResult::PrintAll(packet->data, packet->size, results, locations);
+        if (runningSize != static_cast<size_t>(packet->size)) {
+            VNLOG_ERROR("ERROR: Part of packet unaccounted for");
+        }
+    }
+
+    bool isBaseType(AVCodecID codecID)
+    {
+        switch (codecID) {
+            case AV_CODEC_ID_H264:
+            case AV_CODEC_ID_HEVC:
+            case AV_CODEC_ID_VVC:
+            case AV_CODEC_ID_VP9:
+            case AV_CODEC_ID_VP8:
+            case AV_CODEC_ID_AV1: return true;
+            default: return false;
+        }
+    }
+
+    bool isBaseTypeSizeCountable(AVCodecID codecID)
+    {
+        switch (codecID) {
+            case AV_CODEC_ID_H264:
+            case AV_CODEC_ID_HEVC:
+            case AV_CODEC_ID_VVC: return true;
+            case AV_CODEC_ID_VP9:
+            case AV_CODEC_ID_VP8:
+            case AV_CODEC_ID_AV1:
+            default: return false;
+        }
+    }
+
+} // namespace
+
+ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType type, const Config& config)
     : m_inputType(type)
     , m_config(config)
     , m_packet(av_packet_alloc())
 {
     if (!m_packet) {
-        VNLog::Error("Error: Failed to allocate AVPacket\n");
+        VNLOG_ERROR("Failed to allocate AVPacket");
         return;
     }
 
@@ -167,23 +485,23 @@ ExtractorDemuxer::ExtractorDemuxer(const std::string& url, InputType type, const
         case InputType::MP4: {
             fmt = av_find_input_format("mp4");
             if (fmt == nullptr) {
-                VNLog::Info("Failed to turn input_type into a valid input format for mp4.");
+                VNLOG_INFO("Failed to turn input_type into a valid input format for mp4");
             }
         } break;
-        case InputType::ELEMENTARY: {
+        case InputType::ES: {
             switch (config.baseType) {
-                case vnova::utility::BaseType::Enum::H264: {
+                case vnova::helper::BaseType::H264: {
                     fmt = av_find_input_format("h264");
                 } break;
-                case vnova::utility::BaseType::Enum::HEVC: {
+                case vnova::helper::BaseType::HEVC: {
                     fmt = av_find_input_format("hevc");
                 } break;
-                case vnova::utility::BaseType::Enum::VVC: {
+                case vnova::helper::BaseType::VVC: {
                     fmt = av_find_input_format("vvc");
                 } break;
                 default: {
                     if (fmt == nullptr) {
-                        VNLog::Info("Failed to turn base_type into a valid input format for es.");
+                        VNLOG_INFO("Failed to turn base_type into a valid input format for es");
                     }
                     break;
                 }
@@ -192,31 +510,25 @@ ExtractorDemuxer::ExtractorDemuxer(const std::string& url, InputType type, const
         case InputType::TS: {
             fmt = av_find_input_format("mpegts");
             if (fmt == nullptr) {
-                VNLog::Info("Failed to turn input_type into a valid input format for ts.");
+                VNLOG_INFO("Failed to turn input_type into a valid input format for ts");
             }
         } break;
         default: break;
     }
 
-    if (avformat_open_input(&m_formatContext, url.c_str(), fmt, nullptr) != 0) {
-        VNLog::Error("Could not open input file \n");
+    if (avformat_open_input(&m_formatContext, url.string().c_str(), fmt, nullptr) != 0) {
+        VNLOG_ERROR("Could not open input file ");
         return;
     }
     if (avformat_find_stream_info(m_formatContext, nullptr) < 0) {
-        VNLog::Error("Could not find stream info \n");
-        return;
-    }
-    m_frame = av_frame_alloc();
-    if (!m_frame) {
-        VNLog::Error("Error: Failed to allocate AVFrame \n");
+        VNLOG_ERROR("Could not find stream info ");
         return;
     }
 
     fixMisclassifiedStreams(*m_formatContext);
     determineStreamTypes();
-    m_nalUnit.reserve(32768);
-    durationSec = (double)m_formatContext->duration / AV_TIME_BASE;
-    bInitialized = true;
+    m_durationSec = (double)m_formatContext->duration / AV_TIME_BASE;
+    m_initialized = true;
 }
 
 ExtractorDemuxer::~ExtractorDemuxer()
@@ -231,167 +543,225 @@ ExtractorDemuxer::~ExtractorDemuxer()
         (void)streamIndex;
         avcodec_free_context(&codecCtx);
     }
-    av_frame_free(&m_frame);
-    m_nalUnit.clear();
-}
-
-static bool baseVideoCodec(AVCodecID codecID)
-{
-    switch (codecID) {
-        case AV_CODEC_ID_H264:
-        case AV_CODEC_ID_HEVC:
-        case AV_CODEC_ID_VP9:
-        case AV_CODEC_ID_VP8:
-        case AV_CODEC_ID_AV1:
-        case AV_CODEC_ID_VVC: return true;
-        default: return false;
-    }
 }
 
 void ExtractorDemuxer::determineStreamTypes()
 {
     for (unsigned int i = 0; i < m_formatContext->nb_streams; ++i) {
-        AVCodecParameters* codecPar = m_formatContext->streams[i]->codecpar;
+        AVStream* stream = m_formatContext->streams[i];
+        const AVCodecParameters* codecPar = stream->codecpar;
         AVCodecID codecID = codecPar->codec_id;
 
         if (codecPar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            baseFps = codecPar->framerate.num;
-            m_maxReorder = codecPar->video_delay;
+            if (m_baseFramerate.has_value() == false) {
+                m_baseFramerate = guessFramerate(m_formatContext, codecPar, stream);
+            }
+            if (m_baseTimebase.has_value() == false) {
+                m_baseTimebase = guessTimebase(m_formatContext, codecPar, stream);
+            }
+            m_maxReorder = std::max(static_cast<uint8_t>(codecPar->video_delay), m_maxReorder);
         }
 
         if (codecID == AV_CODEC_ID_LCEVC || codecPar->codec_tag == kLCEVCCodec) {
-            m_lcevcStreamIndex = static_cast<int>(i);
-        } else if (baseVideoCodec(codecID)) {
-            bBaseStream = true;
+            VNLOG_INFO("Stream index %d contains LCEVC data", stream->index);
+            m_lcevcStreamIndex = stream->index;
+        } else if (isBaseType(codecID)) {
+            VNLOG_INFO("Stream index %d contains %s video data", stream->index, avcodec_get_name(codecID));
+            // Guarding rather than assigning prevents subesquent non-video streams from putting this back to false.
+            m_hasBaseVideoStream = true;
+            m_baseVideoStreamIsSizeCountable = isBaseTypeSizeCountable(codecID);
+        } else {
+            VNLOG_INFO("Stream index %d contains %s data, skipping", stream->index,
+                       avcodec_get_name(codecID));
         }
     }
-    if (m_config.inputType == InputType::ELEMENTARY) {
-        bRawStream = true;
+    if (m_config.inputType == InputType::ES) {
+        m_rawStream = true;
     }
-    if (m_inputType == InputType::MP4 && m_lcevcStreamIndex != -1 && bBaseStream) {
-        AVCodecParameters* codecPar = m_formatContext->streams[m_lcevcStreamIndex]->codecpar;
+    if (m_inputType == InputType::MP4 && m_lcevcStreamIndex.has_value() && m_hasBaseVideoStream) {
+        const AVCodecParameters* codecPar = m_formatContext->streams[m_lcevcStreamIndex.value()]->codecpar;
         LCEVCDecoderConfiguration config = {};
         if (parseLvcCAtom(codecPar->extradata, codecPar->extradata_size, config)) {
-            lvccProfile = config.lcevcProfileIndication;
-            lvccLevel = config.lcevcLevelIndication;
-            bLvccPresent = true;
+            m_lvccProfile = config.lcevcProfileIndication;
+            m_lvccLevel = config.lcevcLevelIndication;
+            m_lvccPresent = true;
         } else {
-            VNLog::Info("InValid LVCC Atom found.\n");
+            VNLOG_INFO("InValid LVCC Atom found");
         }
     }
 }
 
-void ExtractorDemuxer::addLCEVCData(LCEVC& lcevc, std::vector<LCEVC>& lcevcFrames)
+bool ExtractorDemuxer::storeLcevcFrame(LCEVCFrame& lcevc)
 {
-    lcevc.maxReorderFrames = 32;
-    if (m_inputType == InputType::ELEMENTARY) {
-        lcevc.dts = m_dts++;
-        m_lcevcDataMap[m_decodingIndex++] = std::move(lcevc);
-    } else if (m_packet) {
-        lcevc.pts = m_packet->pts;
-        lcevc.dts = m_packet->dts;
-        lcevcFrames.push_back(std::move(lcevc));
-    }
-}
+    lcevc.maxReorderFrames = m_maxReorder;
 
-bool ExtractorDemuxer::handleNALUnit(const std::vector<uint8_t>& nalUnit, std::vector<LCEVC>& lcevcFrames)
-{
-    LCEVC lcevc;
-    if (nalUnit.empty()) {
+    if (lcevc.lcevcWireSize <= 0) {
+        lcevc.lcevcWireSize = static_cast<int64_t>(lcevc.data.size());
+    }
+
+    if ((m_remainingSizeForDts.count(lcevc.dts) > 0) &&
+        (m_remainingSizeForDts[lcevc.dts] - lcevc.lcevcWireSize >= 0)) {
+        m_remainingSizeForDts[lcevc.dts] -= lcevc.lcevcWireSize;
+
+    } else if (m_baseVideoStreamIsSizeCountable) {
+        // This check does not apply to non-size countable base streams (AV1, VP9)
+        VNLOG_ERROR("Not sure how to account for lcevc bytes as there is no remaining size map "
+                    "entry for dts %d, or subtracting %d from it would send it negative",
+                    lcevc.dts, lcevc.lcevcWireSize);
         return false;
     }
-    if (processNALUnit(nalUnit, lcevc, m_baseType)) {
-        addLCEVCData(lcevc, lcevcFrames);
-        return true;
+
+    lcevc.totalWireSize = m_totalSizeForDts[lcevc.dts];
+
+    // A demuxed frame is considered finished if it has a valid PTS. Until we have matched with a
+    // base frame, the PTS remains invalid. The correct PTS for this LCEVC frame will be given to
+    // the LCEVC frame in provideFrameInfoToLcevc(), and the demuxed frame will be marked finished
+    // then.
+    const bool finished = lcevc.pts != kInvalidPts;
+    m_demuxedFrameMap[m_lcevcDecodeIndex] = {std::move(lcevc), m_lcevcDecodeIndex, finished};
+    m_lcevcDecodeIndex += 1;
+
+    return true;
+}
+
+bool ExtractorDemuxer::releaseLcevcFrame(std::vector<LCEVCFrame>& lcevcFrames)
+{
+    auto it = m_demuxedFrameMap.find(m_mapSearchIndex);
+    if (it == m_demuxedFrameMap.end()) {
+        return false;
+    }
+
+    DemuxedFrame& demuxedFrame = it->second;
+    if (demuxedFrame.finished == false) {
+        if (const auto preParsedFrameIt = m_preParsedFrameInfo.find(demuxedFrame.decodeIndex);
+            preParsedFrameIt != m_preParsedFrameInfo.end()) {
+            provideFrameInfoToLcevc(demuxedFrame.decodeIndex, preParsedFrameIt->second);
+            m_preParsedFrameInfo.erase(preParsedFrameIt);
+        } else {
+            return false;
+        }
+    }
+
+    if (m_releasedPtsTracker.count(demuxedFrame.lcevc.pts) > 0) {
+        VNLOG_ERROR("Trying to release lcevc frame %d but a previous frame had same pts %d",
+                    m_mapSearchIndex, demuxedFrame.lcevc.pts);
+        m_error = true;
+        return false;
+    }
+    m_releasedPtsTracker.insert(demuxedFrame.lcevc.pts);
+
+    demuxedFrame.lcevc.totalWireSize = m_totalSizeForDts[demuxedFrame.lcevc.dts];
+    lcevcFrames.push_back(demuxedFrame.lcevc);
+    m_demuxedFrameMap.erase(it);
+    m_mapSearchIndex += 1;
+    return true;
+}
+
+bool ExtractorDemuxer::handlePacketNalUnit(const utility::DataBuffer& nalBuffer)
+{
+    if (nalBuffer.empty()) {
+        return false;
+    }
+    if (std::optional<LCEVCFrame> lcevcOpt = parseNalIsLcevc(nalBuffer, m_baseType); lcevcOpt.has_value()) {
+        auto& lcevc = lcevcOpt.value();
+        lcevc.dts = m_packet->dts;
+        return storeLcevcFrame(lcevc);
     }
     return false;
 }
 
-bool ExtractorDemuxer::extractLCEVCData(std::vector<LCEVC>& lcevcFrames, const int streamPID)
+bool ExtractorDemuxer::extractLcevcStream(const int streamPID)
 {
-    m_nalUnit.clear();
-    bool bInNAL = false;
-    const uint8_t* dataPtr = m_packet->data;
-    size_t packetSize = m_packet->size;
+    utility::DataBuffer nalBuffer;
+    nalBuffer.clear();
 
-    const int desiredPID = m_config.tsPID;
-    if (desiredPID != -1 && streamPID != desiredPID) {
+    bool nalStarted = false;
+    bool foundLcevcNal = false;
+
+    utility::Span data{m_packet->data, static_cast<size_t>(m_packet->size)};
+
+    if (const int desiredPID = m_config.tsPID; desiredPID != -1 && streamPID != desiredPID) {
         return false;
     }
 
-    while (packetSize > 0) {
-        const uint8_t* readPtr = dataPtr;
+    while (data.Remaining() > 0) {
+        if (uint8_t startCodeSize = 0;
+            helper::matchAnnexBStartCode(data.Head(), data.Remaining(), startCodeSize)) {
+            // It's the start of a new NAL unit - if we have one buffered, process it now. The
+            // first pass through this loop we won't.
 
-        uint32_t startCodeSize = 0;
-        if (matchAnnexBStartCode(readPtr, packetSize, startCodeSize)) {
-            if (bInNAL && !m_nalUnit.empty()) {
-                bool foundLCEVC = handleNALUnit(m_nalUnit, lcevcFrames);
-                if (m_inputType == InputType::TS && foundLCEVC) {
-                    return true;
-                }
-                m_nalUnit.clear();
+            if (nalStarted && handlePacketNalUnit(nalBuffer) && m_inputType == InputType::TS) {
+                // We found LCEVC!
+                foundLcevcNal = true;
             }
-            bInNAL = true;
 
-            m_nalUnit.insert(m_nalUnit.end(), readPtr, readPtr + startCodeSize);
-            readPtr += startCodeSize;
+            // We did not find LCEVC, clear buffer and test next NAL.
+            nalBuffer.clear();
+
+            // Store the Annex B start code. We will then copy each byte in until the next start code, to process the NAL
+            // header as one when we encounter the next NAL start, or the end of the packet.
+            nalBuffer.insert(nalBuffer.end(), data.Head(), data.Head() + startCodeSize);
+            data.Forward(startCodeSize);
+
+            // Now we are in a NAL.
+            nalStarted = true;
+
         } else {
-            m_nalUnit.push_back(*readPtr);
-            ++readPtr;
+            // Copy byte in to working nal unit.
+            nalBuffer.push_back(*data.Head());
+            data.Forward(1);
         }
+    }
 
-        size_t offset = readPtr - dataPtr;
-        dataPtr += offset;
-        packetSize -= offset;
+    // Process the last NAL unit in our packet.
+    if (nalStarted && handlePacketNalUnit(nalBuffer) && m_inputType == InputType::TS) {
+        foundLcevcNal = true;
     }
-    // Last NAL unit
-    if (bInNAL && !m_nalUnit.empty()) {
-        bool foundLCEVC = handleNALUnit(m_nalUnit, lcevcFrames);
-        if (m_inputType == InputType::TS && foundLCEVC) {
-            return true;
-        }
-        m_nalUnit.clear();
+
+    if (foundLcevcNal == true) {
+        return true;
     }
-    return bRawStream;
+
+    return m_rawStream;
 }
 
-bool ExtractorDemuxer::extractLCEVCMp4(std::vector<LCEVC>& lcevcFrames)
+bool ExtractorDemuxer::extractLcevcMp4()
 {
     const uint8_t* ptr = m_packet->data;
     const uint8_t* data = ptr;
     size_t packetSize = m_packet->size;
 
-    LCEVC lcevc;
+    utility::DataBuffer nalBuffer;
+    nalBuffer.reserve(32768);
+
     while (packetSize > 0) {
-        uint32_t headerSize = 0;
-        if (!readBE(ptr, packetSize, headerSize)) {
+        uint32_t payloadSize = 0;
+        if (!readBE(ptr, packetSize, payloadSize)) {
             return false;
         }
 
-        m_nalUnit.assign(ptr, ptr + headerSize);
-        if (processNALUnit(m_nalUnit, lcevc, m_baseType)) {
-            if (bFourBytePrefix) {
-                lcevc.data.insert(lcevc.data.begin(), data, data + 4);
-            }
-            addLCEVCData(lcevc, lcevcFrames);
+        if (payloadSize > packetSize) {
+            VNLOG_ERROR("Reported payloadSize (%d) >  remaining packetSize (%d)", payloadSize, packetSize);
+            m_error = true;
+            return false;
+        }
+
+        nalBuffer.assign(ptr, ptr + payloadSize);
+        if (handlePacketNalUnit(nalBuffer)) {
             return true;
         }
 
-        packetSize -= headerSize;
-        data += (headerSize + 4);
+        packetSize -= payloadSize;
+        data += (payloadSize + 4);
         ptr = data;
     }
-    if (processNALUnit(m_nalUnit, lcevc, m_baseType)) {
-        if (bFourBytePrefix) {
-            lcevc.data.insert(lcevc.data.begin(), data, data + 4);
-        }
-        addLCEVCData(lcevc, lcevcFrames);
+    if (handlePacketNalUnit(nalBuffer)) {
         return true;
     }
     return false;
 }
 
-bool ExtractorDemuxer::extractLCEVCWebm(std::vector<LCEVC>& lcevcFrames)
+bool ExtractorDemuxer::extractLcevcWebm()
 {
     for (int i = 0; i < m_packet->side_data_elems; i++) {
         if (m_packet->side_data[i].type != AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL) {
@@ -405,154 +775,169 @@ bool ExtractorDemuxer::extractLCEVCWebm(std::vector<LCEVC>& lcevcFrames)
             continue;
         }
 
-        LCEVC lcevc;
+        LCEVCFrame lcevc;
+        lcevc.dts = m_packet->dts;
+
         if (id == kBlockAdditionalLcevcId) {
             lcevc.data.assign(blockData, blockData + size);
-            addLCEVCData(lcevc, lcevcFrames);
-            return true;
+            return storeLcevcFrame(lcevc);
         }
     }
     return false;
 }
 
-bool ExtractorDemuxer::validateLCEVCAnnexB()
+bool ExtractorDemuxer::validateMp4IsNotAnnexB()
 {
-    const uint8_t* data = m_packet->data;
-    size_t size = m_packet->size;
+    const bool isMp4 = m_inputType == InputType::MP4;
 
-    const bool hasAnnexBLcevc = parseAnnexBHeader(data, size, CodecType::LCEVC);
+    if (isMp4 && parseAnnexBHeader(m_packet->data, m_packet->size, helper::CodecType::LCEVC)) {
+        VNLOG_ERROR("MP4 must use length-prefixed NAL units, not Annex B start codes.");
+        m_error = true;
+        return false;
+    }
 
-    if (m_inputType == InputType::MP4) {
-        if (hasAnnexBLcevc) {
-            VNLog::Error("Invalid format: MP4 input contains Annex B start codes "
-                         "instead of length-prefixed NAL units.\n");
-            bError = true;
+    m_fourBytePrefix = isMp4;
+
+    return true;
+}
+
+bool ExtractorDemuxer::extractFromSingleTrack(const char* streamCodecName, const int streamPID)
+{
+    m_baseType = helper::baseTypeFromString(streamCodecName);
+    switch (m_inputType) {
+        case InputType::MP4: {
+            return extractLcevcMp4();
+        }
+        case InputType::WEBM: {
+            return extractLcevcWebm();
+        }
+        case InputType::ES: [[fallthrough]];
+        case InputType::TS: {
+            return extractLcevcStream(streamPID);
+        }
+        default:
+            VNLOG_ERROR("Unsupported input type: %d", static_cast<int>(m_inputType));
             return false;
+    }
+}
+
+bool ExtractorDemuxer::extractFromSeparateTrack(const int streamPID)
+{
+    if (m_inputType == InputType::TS && (streamPID != m_config.tsPID && m_config.tsPID != -1)) {
+        return false;
+    }
+
+    if (validateMp4IsNotAnnexB() == false) {
+        return false;
+    }
+
+    LCEVCFrame lcevc;
+    lcevc.dts = m_packet->dts;
+
+    if (m_packet->pts == kInvalidPts) {
+        VNLOG_ERROR("Invalid pts in separate track - this is unexpected");
+        m_error = true;
+        return false;
+    }
+    lcevc.pts = m_packet->pts;
+
+    lcevc.maxReorderFrames = 32;
+    lcevc.data.insert(lcevc.data.end(), m_packet->data, m_packet->data + m_packet->size);
+
+    const bool ret = storeLcevcFrame(lcevc);
+    lcevc = LCEVCFrame();
+    return ret;
+}
+
+void ExtractorDemuxer::provideFrameInfoToLcevc(int64_t decodingIndex, const BaseFrame& info)
+{
+    if (m_demuxedFrameMap.count(decodingIndex) == 0) {
+        if (m_preParsedFrameInfo.count(decodingIndex) > 0) {
+            VNLOG_ERROR("Already stored pre-parsed frame info for decoding index: %" PRId64, decodingIndex);
+            m_error = true;
+            return;
         }
-        bFourBytePrefix = true;
+        m_preParsedFrameInfo[decodingIndex] = info;
+        return;
     }
-    return true;
+
+    DemuxedFrame& demuxedFrame = m_demuxedFrameMap.at(decodingIndex);
+    if (demuxedFrame.finished == false) {
+        // Now we finally get to give the lcevc frame, which we associated via decodingIndex, its true PTS.
+        demuxedFrame.lcevc.pts = info.pts;
+
+        // This frame is finished.
+        demuxedFrame.finished = true;
+
+    } else if (demuxedFrame.lcevc.pts != info.pts) {
+        // If we claim the frame is finished, then the LCEVC and base pts must match.
+        VNLOG_ERROR(
+            "Supposedly finished lcevc frame pts does not match associated base frame info pts");
+        m_error = true;
+        return;
+    }
 }
 
-bool ExtractorDemuxer::extractFromSeparateTrack(std::vector<LCEVC>& lcevcFrames, const int streamPID)
+bool ExtractorDemuxer::populateFrameInfo(AVCodecContext& codecCtx, BaseFrameQueue& frameQueue)
 {
-    const int desiredPID = m_config.tsPID;
-    if (m_inputType == InputType::TS && (streamPID != desiredPID && desiredPID != -1)) {
+    AVFramePtr frame(av_frame_alloc(), &avFrameDeleter);
+
+    if (!frame) {
+        VNLOG_ERROR("Failed to allocate AVFrame ");
         return false;
     }
 
-    if (!validateLCEVCAnnexB()) {
-        return false;
-    }
-
-    if (m_packet->pos != m_pos && !m_lcevcAccumulator.data.empty()) {
-        lcevcFrames.push_back(std::move(m_lcevcAccumulator));
-        m_lcevcAccumulator = LCEVC();
-    }
-
-    if (m_packet->pts != AV_NOPTS_VALUE && m_packet->pts != AV_NOPTS_VALUE) {
-        m_lcevcAccumulator.pts = m_packet->pts;
-        m_lcevcAccumulator.dts = m_packet->dts;
-    }
-
-    m_pos = m_packet->pos;
-    m_lcevcAccumulator.maxReorderFrames = 32;
-    m_lcevcAccumulator.data.insert(m_lcevcAccumulator.data.end(), m_packet->data,
-                                   m_packet->data + m_packet->size);
-    return true;
-}
-
-bool ExtractorDemuxer::processNALFrameData(int64_t decodingIndex, FrameInfo& info,
-                                           std::vector<LCEVC>& lcevcFrames)
-{
-    auto it = m_lcevcDataMap.find(decodingIndex);
-    if (it == m_lcevcDataMap.end()) {
-        VNLog::Error("No LCEVC data found for decoding index: %" PRId64, decodingIndex);
-        bError = true;
-        return false;
-    }
-
-    LCEVC& lcevc = it->second;
-
-    info.pts = m_maxReorder + m_pts++;
-    lcevc.pts = info.pts;
-    lcevc.frameType = info.frameType;
-    lcevc.frameSize = static_cast<int64_t>(info.frameSize);
-
-    auto lcevcIt = m_lcevcDataMap.find(m_decodingCounter);
-    if (lcevcIt != m_lcevcDataMap.end()) {
-        LCEVC& lcevcOutput = lcevcIt->second;
-        if (lcevcOutput.pts != kInvalidPts) {
-            lcevcFrames.push_back(lcevcOutput);
-            m_lcevcDataMap.erase(lcevcIt);
-            m_decodingCounter++;
-        }
-    }
-
-    return true;
-}
-
-bool ExtractorDemuxer::populateFrameInfo(AVCodecContext& codecCtx, FrameQueue& framebuffer,
-                                         std::vector<LCEVC>& lcevcFrames)
-{
-    if (!m_frame) {
-        return false;
-    }
-
-    if (int ret = avcodec_receive_frame(&codecCtx, m_frame);
+    if (int ret = avcodec_receive_frame(&codecCtx, frame.get());
         ret == AVERROR_EOF || ret == AVERROR(EAGAIN) || ret < 0) {
         return false;
     }
 
-    FrameInfo info;
-    info.frameNum = codecCtx.frame_num;
-    info.frameSize = static_cast<uint64_t>(codecCtx.width) * codecCtx.height;
-    switch (codecCtx.codec_id) {
-        case AV_CODEC_ID_VP9:
-        case AV_CODEC_ID_AV1: [[fallthrough]];
-        case AV_CODEC_ID_VP8: {
-            info.frameType =
-                (m_packet->flags & AV_PKT_FLAG_KEY) ? FrameType::KeyFrame : FrameType::InterFrame;
-            break;
-        }
-        default:
-            switch (m_frame->pict_type) {
-                case AV_PICTURE_TYPE_I: info.frameType = FrameType::I; break;
-                case AV_PICTURE_TYPE_P: info.frameType = FrameType::P; break;
-                case AV_PICTURE_TYPE_B: info.frameType = FrameType::B; break;
-                default: info.frameType = FrameType::Unknown; break;
-            }
-            break;
+    auto meta = PacketMeta::Retrieve(frame.get());
+    if (meta.has_value() == false) {
+        VNLOG_ERROR("Failed to decode packet metadata");
+        return false;
     }
 
-    baseFrameCount++;
+    const int64_t decodeIndex = meta->decodeIndex;
+    const int64_t presentationIndex =
+        frame->pts == AV_NOPTS_VALUE ? static_cast<int64_t>(m_decodedBaseFrameCount) : frame->pts;
 
-    if (getRawStream()) {
-        return processNALFrameData(m_frame->pts, info, lcevcFrames);
-    }
+    m_decodedBaseFrameCount += 1;
 
-    info.pts = m_frame->pts;
-    framebuffer.enqueue(info);
+    BaseFrame info{decodeIndex,
+                   meta->dts,
+                   presentationIndex,
+                   codecCtx.frame_num,
+                   resolveFrameType(codecCtx, frame.get(), meta->flags),
+                   codecCtx.width,
+                   codecCtx.height};
+
+    provideFrameInfoToLcevc(decodeIndex, info);
+    frameQueue.push(info);
+
     return true;
 }
 
-bool ExtractorDemuxer::extractFrameType(const AVStream& stream, FrameQueue& framebuffer,
-                                        std::vector<LCEVC>& lcevcFrames)
+bool ExtractorDemuxer::processBaseFrame(const AVStream& stream, BaseFrameQueue& frameQueue)
 {
-    int streamIndex = stream.index;
+    const int streamIndex = stream.index;
     AVCodecContext*& codecCtx = m_codecContextMap[streamIndex];
 
     if (!codecCtx) {
         const AVCodec* codec = avcodec_find_decoder(stream.codecpar->codec_id);
         if (!codec) {
-            VNLog::Error("Decoder not found for stream %d\n", streamIndex);
+            VNLOG_ERROR("Decoder not found for stream %d", streamIndex);
             return false;
         }
 
         codecCtx = avcodec_alloc_context3(codec);
+
+        // Push opaque user-defined metadata to each frame from one of the packets which form it.
+        codecCtx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+
         if (!codecCtx || avcodec_parameters_to_context(codecCtx, stream.codecpar) < 0 ||
             avcodec_open2(codecCtx, codec, nullptr) < 0) {
-            VNLog::Error("Failed to init codec context\n");
+            VNLOG_ERROR("Failed to init codec context");
             avcodec_free_context(&codecCtx);
             return false;
         }
@@ -562,18 +947,23 @@ bool ExtractorDemuxer::extractFrameType(const AVStream& stream, FrameQueue& fram
         return false;
     }
 
-    bool bSuccess = false;
-    while (true) {
-        if (!populateFrameInfo(*codecCtx, framebuffer, lcevcFrames)) {
-            break;
-        }
-        bSuccess = true;
+    bool anyFramesProcessed = false;
+    while (populateFrameInfo(*codecCtx, frameQueue)) {
+        anyFramesProcessed = true;
     }
-    return bSuccess;
+    return anyFramesProcessed;
 }
 
-bool ExtractorDemuxer::flush(FrameQueue& frameBuffer, std::vector<LCEVC>& lcevcFrames)
+bool ExtractorDemuxer::flush(BaseFrameQueue& frameQueue, std::vector<LCEVCFrame>& lcevcFrames)
 {
+    // Flush remaining entries from lcevcDataMap
+    {
+        bool hasReleasedFrames = true;
+        while (hasReleasedFrames) {
+            hasReleasedFrames = releaseLcevcFrame(lcevcFrames);
+        }
+    }
+
     bool hasFlushedFrames = false;
     for (const auto& [streamIndex, codecCtx] : m_codecContextMap) {
         if (!m_isFlush) {
@@ -584,74 +974,84 @@ bool ExtractorDemuxer::flush(FrameQueue& frameBuffer, std::vector<LCEVC>& lcevcF
             m_isFlush = true;
         }
 
-        while (populateFrameInfo(*codecCtx, frameBuffer, lcevcFrames)) {
+        while (populateFrameInfo(*codecCtx, frameQueue)) {
             hasFlushedFrames = true;
         }
     }
-    // Flush remaining entries from lcevcDataMap
-    while (!m_lcevcDataMap.empty()) {
-        auto mapIt = m_lcevcDataMap.find(m_decodingCounter);
-        if (mapIt != m_lcevcDataMap.end()) {
-            LCEVC& lcevc = mapIt->second;
-            lcevcFrames.push_back(lcevc);
-            m_lcevcDataMap.erase(mapIt);
 
-            m_decodingCounter++;
-            hasFlushedFrames = true;
+    // Flush remaining entries from lcevcDataMap
+    {
+        bool hasReleasedFrames = true;
+        while (hasReleasedFrames) {
+            hasReleasedFrames = releaseLcevcFrame(lcevcFrames);
         }
     }
+
     return hasFlushedFrames;
 }
 
-bool ExtractorDemuxer::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBuffer)
+bool ExtractorDemuxer::next(std::vector<LCEVCFrame>& lcevcFrames, BaseFrameQueue& frameQueue)
 {
     const int desiredPID = m_config.tsPID;
 
+    // Flush one entries from lcevcDataMap, if there is one ready.
+    releaseLcevcFrame(lcevcFrames);
+
     while (av_read_frame(m_formatContext, m_packet) >= 0) {
-        int currentStreamIndex = m_packet->stream_index;
-        const AVStream* currentStream = m_formatContext->streams[currentStreamIndex];
-        std::string codecID = avcodec_get_name(currentStream->codecpar->codec_id);
-        int streamPID = m_formatContext->streams[currentStreamIndex]->id;
+        const int streamIndex = m_packet->stream_index;
+        const AVStream* stream = m_formatContext->streams[streamIndex];
+        const int streamPID = stream->id;
+        const char* streamCodecName = avcodec_get_name(stream->codecpar->codec_id);
+        const bool streamContainsVideo =
+            m_hasBaseVideoStream && stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        const bool streamIsSeparate = (m_lcevcStreamIndex.has_value() == true);
+        const bool streamIsSeparateAndIsLcevc =
+            streamIsSeparate && (m_lcevcStreamIndex.value() == streamIndex);
 
-        totalPacketSize += m_packet->size;
+        const bool streamIsBase = (streamIsSeparate == false) ||
+                                  (streamIsSeparateAndIsLcevc == false && streamContainsVideo);
 
-        if (m_lcevcStreamIndex == -1 && currentStream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            m_baseType = utility::BaseType::fromString(codecID);
-            switch (m_inputType) {
-                case InputType::MP4: {
-                    m_isLcevcFound |= extractLCEVCMp4(lcevcFrames);
-                    break;
-                }
-                case InputType::WEBM: {
-                    m_isLcevcFound |= extractLCEVCWebm(lcevcFrames);
-                    break;
-                }
-                case InputType::ELEMENTARY: [[fallthrough]];
-                case InputType::TS: {
-                    m_isLcevcFound |= extractLCEVCData(lcevcFrames, streamPID);
-                    break;
-                }
-                default:
-                    VNLog::Error("Unsupported input type: %d\n", static_cast<int>(m_inputType));
-                    m_isLcevcFound |= false;
-                    break;
-            }
-        } else if (currentStreamIndex == m_lcevcStreamIndex) {
-            m_isLcevcFound |= extractFromSeparateTrack(lcevcFrames, streamPID);
+        if (m_config.dumpAuOutputPath.empty() == false) {
+            std::filesystem::create_directories(m_config.dumpAuOutputPath);
+            dumpAVPacket(m_packet, m_config.dumpAuOutputPath);
+
+            scanAnnexBNalUnits(m_packet, streamIndex, m_config.baseType);
         }
 
-        if (currentStream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-            m_packet->stream_index != m_lcevcStreamIndex && bBaseStream) {
-            if (getRawStream()) {
-                m_packet->pts = m_packetCount++;
+        if (m_packet->dts == AV_NOPTS_VALUE) {
+            if (m_rawStream == true) {
+                // Synthesize a monotonically incrementing dts for raw streams.
+                m_packet->dts = m_baseDecodeIndex[streamIndex];
+            } else {
+                VNLOG_ERROR("Invalid pts for non-ES packet at pos %d", m_packet->pos);
+                av_packet_unref(m_packet);
+                return true;
             }
-            if (baseFps == 0) {
-                baseFps = currentStream->avg_frame_rate.num / currentStream->avg_frame_rate.den;
-            }
-            extractFrameType(*currentStream, frameBuffer, lcevcFrames);
         }
 
-        if (m_isLcevcFound) {
+        PacketMeta::Attach(m_packet, m_baseDecodeIndex[streamIndex]);
+        m_baseDecodeIndex[streamIndex] += 1;
+
+        m_totalSizeForDts[m_packet->dts] += m_packet->size;
+        m_remainingSizeForDts[m_packet->dts] += m_packet->size;
+
+        if (streamIsSeparateAndIsLcevc) {
+            m_isLcevcFound |= extractFromSeparateTrack(streamPID);
+        } else if (streamContainsVideo) {
+            m_isLcevcFound |= extractFromSingleTrack(streamCodecName, streamPID);
+        } else {
+            // Audio, other tracks, etc... Do nothing.
+            av_packet_unref(m_packet);
+            return true;
+        }
+
+        if (streamIsBase) {
+            processBaseFrame(*stream, frameQueue);
+        }
+
+        // We processed a packet in this call to next and have at some point found LCEVC.
+        // There is more to come, so return true.
+        if (m_isLcevcFound == true) {
             av_packet_unref(m_packet);
             return true;
         }
@@ -659,19 +1059,19 @@ bool ExtractorDemuxer::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBu
 
     if (m_isLcevcFound == false) {
         if (m_inputType == InputType::TS) {
-            VNLog::Error("*** Demux - PID: 0x%X - LCEVC data not found in packet***\n", desiredPID);
+            VNLOG_ERROR("Demux PID: %d - LCEVC data not found in packet", desiredPID);
         } else {
-            VNLog::Error("Failed to find lcevc in packet\n");
+            VNLOG_ERROR("Failed to find LCEVC in packet");
         }
         av_packet_unref(m_packet);
-        bError = true;
+        m_error = true;
         return false;
     }
 
     if (m_lcevcAccumulator.data.empty() == false) {
-        lcevcFrames.push_back(std::move(m_lcevcAccumulator));
-        m_lcevcAccumulator = LCEVC();
-        return true;
+        bool ret = storeLcevcFrame(m_lcevcAccumulator);
+        m_lcevcAccumulator = LCEVCFrame();
+        return ret;
     }
 
     return false;

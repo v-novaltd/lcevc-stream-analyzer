@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,52 +22,28 @@
  */
 #include "extractor_sei.h"
 
-#include "utility/log_util.h"
-#include "utility/nal_header.h"
-#include "utility/nal_unit.h"
+#include "helper/nal_unit.h"
+#include "utility/platform.h"
 
-#include <string>
+#include <array>
 
 using namespace vnova::utility;
+using namespace vnova::helper;
 
 namespace vnova::analyzer {
-static constexpr uint8_t kRegisterUserDataSEIType = 4;
-static constexpr uint32_t kLCEVCITUSize = 4;
-static constexpr uint8_t kLCEVCITUHeader[kLCEVCITUSize] = {0xb4, 0x00, 0x50, 0x00};
-// LCEVC NAL detection is handled by CodecType::LCEVC parsing in nal_header
 
-bool isSEINALUnit(BaseType::Enum baseType, const uint8_t* data, size_t length, uint32_t& headerSize,
-                  bool& bError)
-{
-    bError = false;
-    headerSize = 0;
-
-    ParsedNALHeader hdr;
-    if (!parseAnnexBHeader(data, length, baseType, hdr)) {
-        return false;
-    }
-
-    headerSize = hdr.headerSize;
-    return isSEI(hdr);
-}
-
-bool isLCEVCITUPayload(const uint8_t* data)
-{
-    return memcmp(data, kLCEVCITUHeader, kLCEVCITUSize) == 0;
-}
-
-ExtractorSEI::ExtractorSEI(const std::string& url, InputType type, const Config& config)
+ExtractorSEI::ExtractorSEI(const std::filesystem::path& url, InputType type, const Config& config)
     : ExtractorDemuxer(url, type, config)
 {}
 
-bool ExtractorSEI::processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lcevc,
-                                  utility::BaseType::Enum& baseType)
+std::optional<LCEVCFrame> ExtractorSEI::parseNalIsLcevc(const utility::DataBuffer& nalUnit,
+                                                        helper::BaseType& baseType)
 {
+    LCEVCFrame lcevc;
     const uint8_t* nalUnitData = nalUnit.data();
     size_t nalUnitLength = nalUnit.size();
-    uint32_t headerLength = 0;
 
-    if (isSEINALUnit(baseType, nalUnitData, nalUnitLength, headerLength, bError)) {
+    if (uint32_t headerLength = 0; isSEINALUnit(baseType, nalUnitData, nalUnitLength, headerLength)) {
         // Ignore header
         nalUnitData += headerLength;
         nalUnitLength -= headerLength;
@@ -77,7 +53,7 @@ bool ExtractorSEI::processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lce
         // never expand the number of bytes only contract.
         utility::DataBuffer data(nalUnitLength, 0);
 
-        const uint32_t dataLength = nalUnencapsulate(data.data(), nalUnitData, nalUnitLength);
+        const uint32_t dataLength = helper::nalUnencapsulate(data.data(), nalUnitData, nalUnitLength);
         VNAssert(dataLength <= nalUnitLength);
 
         const uint8_t* dataPtr = data.data();
@@ -86,7 +62,7 @@ bool ExtractorSEI::processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lce
         // There can be multiple payloads within a single NAL unit so process them
         // all.
         while (dataPtr < dataEnd) {
-            const uint8_t payloadType = *dataPtr++;
+            const auto payloadType = std::byte{*dataPtr++};
             VNAssert(dataPtr < dataEnd);
 
             size_t payloadSize = 0;
@@ -97,24 +73,28 @@ bool ExtractorSEI::processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lce
             }
             payloadSize += *dataPtr++;
 
-            if ((payloadType == kRegisterUserDataSEIType) && (payloadSize >= kLCEVCITUSize) &&
-                isLCEVCITUPayload(dataPtr)) {
+            if ((payloadType == helper::kRegisterUserDataSEIType.at(0)) &&
+                (payloadSize >= helper::kLCEVCITUHeader.size()) && helper::isLCEVCITUPayload(dataPtr)) {
+                const auto nalWireSize = nalUnitLength + headerLength;
+
                 // Found LCEVC data, now store it without the ITU T.35 header.
-                lcevc.data.assign(dataPtr + kLCEVCITUSize, dataPtr + payloadSize);
+                lcevc.data.assign(dataPtr + helper::kLCEVCITUHeader.size(), dataPtr + payloadSize);
+                lcevc.lcevcWireSize = static_cast<int64_t>(nalWireSize);
 
                 // Only 1 LCEVC payload per SEI NAL unit.
-                return true;
+                return lcevc;
             }
 
             dataPtr += payloadSize;
         }
     } else {
-        if (parseAnnexBHeader(nalUnit, CodecType::LCEVC)) {
+        if (parseAnnexBHeader(nalUnit, helper::CodecType::LCEVC)) {
             lcevc.data.assign(nalUnitData, nalUnitData + nalUnitLength);
-            return true;
+            return lcevc;
         }
     }
-    return false;
+
+    return std::nullopt;
 }
 
 } // namespace vnova::analyzer

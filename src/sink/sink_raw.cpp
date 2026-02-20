@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,9 +22,9 @@
  */
 #include "sink_raw.h"
 
-#include "config.h"
-#include "extractor/extractor.h"
-#include "io/file_io.h"
+#include "app/config.h"
+#include "utility/file_io.h"
+#include "utility/log_util.h"
 
 namespace vnova::analyzer {
 SinkRaw::SinkRaw(const Config& config, bool lengthDelimited)
@@ -34,22 +34,25 @@ SinkRaw::SinkRaw(const Config& config, bool lengthDelimited)
 
 bool SinkRaw::initialise()
 {
-    const auto& outputPath = config.outputPath;
+    const auto& binOutputPath = config.extractOutputPath;
 
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
-    m_file = std::make_unique<utility::io::FileIOWrite>(outputPath);
+    m_file = std::make_unique<utility::io::FileIOWrite>(binOutputPath);
     return (m_file != nullptr);
 }
 
 void SinkRaw::release() {}
 
-bool SinkRaw::write(const LCEVC& lcevc)
+bool SinkRaw::write(const helper::LCEVCFrame& lcevc)
 {
     if (!m_file) {
         return false;
     }
 
     const auto size = static_cast<uint32_t>(lcevc.data.size());
+
+    VNLOG_INFO("Writing raw formatted LCEVC frame %zu with size %zu bytes to file", m_index, size);
+    m_index++;
 
     if (m_lengthDelimited) { // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         if (!m_file->write(reinterpret_cast<const std::byte*>(&size), sizeof(uint32_t))) {

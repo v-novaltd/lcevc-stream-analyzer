@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -27,6 +27,7 @@
 #include <cstddef>
 
 using namespace vnova::utility;
+using namespace vnova::helper;
 
 namespace vnova::analyzer {
 
@@ -39,15 +40,15 @@ static constexpr bool isStartCode3(const uint8_t* array) noexcept
     return array[0] == 0x00 && array[1] == 0x00 && array[2] == 0x01;
 }
 
-ExtractorLCEVC::ExtractorLCEVC(const std::string& url)
+ExtractorLCEVC::ExtractorLCEVC(const std::filesystem::path& url)
 {
     // Raw stream of LCEVC NAL units
-    bRawStream = true;
+    m_rawStream = true;
 
     // Read entire file into memory and index NAL start codes
     io::FileIORead file(url);
     if (!file.isValid()) {
-        VNLog::Error("Failed to open LCEVC input: %s\n", url.c_str());
+        VNLOG_ERROR("Failed to open LCEVC input: %s", url.c_str());
         return;
     }
 
@@ -56,15 +57,15 @@ ExtractorLCEVC::ExtractorLCEVC(const std::string& url)
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (file.read(reinterpret_cast<std::byte*>(m_buffer.data()), sz) != sz) {
-        VNLog::Error("Failed to read LCEVC input\n");
+        VNLOG_ERROR("Failed to read LCEVC input");
         return;
     }
 
+    m_fourBytePrefix = true;
+
     indexAnnexB();
 
-    // Normalize to 4-byte prefix for consistent parsing
-    bFourBytePrefix = true;
-    bInitialized = true;
+    m_initialized = true;
 }
 
 void ExtractorLCEVC::indexAnnexB()
@@ -87,7 +88,7 @@ void ExtractorLCEVC::indexAnnexB()
     }
 }
 
-bool ExtractorLCEVC::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& /*frameBuffer*/)
+bool ExtractorLCEVC::next(std::vector<LCEVCFrame>& lcevcFrames, BaseFrameQueue& /*frameQueue*/)
 {
     if (m_index >= m_starts.size()) {
         return false;
@@ -100,7 +101,7 @@ bool ExtractorLCEVC::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& /*frameBu
         return (m_index < m_starts.size());
     }
 
-    LCEVC out;
+    LCEVCFrame out;
     // Determine actual start-code length at this NAL
     size_t codeLen = 0;
     if (start + 4 <= m_buffer.size() && isStartCode4(&m_buffer[start])) {
@@ -121,10 +122,11 @@ bool ExtractorLCEVC::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& /*frameBu
                         m_buffer.begin() + static_cast<int64_t>(end));
     }
 
-    totalPacketSize += out.data.size();
-
     out.pts = m_counter;
     out.dts = m_counter;
+
+    m_totalSizeForDts[out.dts] += static_cast<int64_t>(out.data.size());
+
     // Ensure the reorder buffer dequeues immediately for raw streams
     out.maxReorderFrames = 1;
 

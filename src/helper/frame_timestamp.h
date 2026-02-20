@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,50 +20,25 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#ifndef VN_SRC_CONFIG_TYPES_H_
-#define VN_SRC_CONFIG_TYPES_H_
+#ifndef VN_UTILITY_PTS_VALIDATION_H_
+#define VN_UTILITY_PTS_VALIDATION_H_
 
 #include <cstdint>
+#include <map>
+#include <optional>
+#include <vector>
 
-namespace vnova::analyzer {
+namespace vnova::helper::timestamp {
 
-enum class ReturnCode : int
+struct TimestampStats
 {
-    Success = 0,
-    ArgParseFail = 1,
-    ExtractorFactoryFail = 2,
-    SinkFactoryFail = 3,
-    ParseFail = 4,
-    ExtractionFail = 5,
-    DecodeFail = 6,
-    FileFail = 7,
+    bool consistent = false;
+    size_t intervalCount = 0;
+    std::multimap<size_t, int64_t> intervalFrequencies;
 };
 
-enum class InputType
-{
-    TS,         // LCEVC is held within a TS (presummed to be SEI data).
-    ELEMENTARY, // LCEVC is embedded as SEI data or interleaved with base NAL units.
-    WEBM,       // LCEVC is stored in a WEBM container
-    MP4,        // LCEVC is stored in a MP4 container
-    BIN,        // LCEVC is stored in a BIN container
-    LCEVC,      // Raw LCEVC NAL units in Annex B format
-    Unknown
-};
+std::optional<TimestampStats> validateSequence(const std::vector<int64_t>& pts);
 
-enum class OutputType
-{
-    Bin,             // LCEVC is written in LCEVC bin format.
-    Raw,             // LCEVC is written as raw LCEVC NALUs.
-    LengthDelimited, // LCEVC is delimited by 4-byte uint lengths.
-    Unknown
-};
+} // namespace vnova::helper::timestamp
 
-enum class LogFormat
-{
-    Text, // Human-readable unstructured text.
-    JSON, // Structured JSON.
-};
-
-} // namespace vnova::analyzer
-
-#endif // VN_SRC_CONFIG_TYPES_H_
+#endif

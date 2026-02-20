@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,11 +23,12 @@
 #ifndef VN_BIN_LCEVC_BIN_H_
 #define VN_BIN_LCEVC_BIN_H_
 
-#include "io/file_io.h"
+#include "utility/file_io.h"
+#include "utility/types_util.h"
 
 #include <memory>
 
-namespace vnova::utility {
+namespace vnova::helper::bin {
 /*
     This file contains utility functionality to assist with the reading and
     writing of raw LCEVC data into a structured file-format.
@@ -153,7 +154,7 @@ enum class LCEVCBinBlockType
 struct LCEVCBinBlock
 {
     LCEVCBinBlockType blockType;
-    DataBuffer blockData;
+    utility::DataBuffer blockData;
 };
 
 struct LCEVCBinLCEVCPayload
@@ -182,7 +183,7 @@ public:
     // This requires that a valid path is passed as an argument.
     //
     // \return Returns false if it fails, true otherwise.
-    bool initialise(const std::string& path);
+    bool initialise(const std::filesystem::path& path);
     void release();
 
     bool isValid() { return m_file && m_file->isValid(); }
@@ -206,7 +207,7 @@ public:
 
 private:
     uint32_t m_version = 0;
-    std::unique_ptr<io::FileIORead> m_file;
+    std::unique_ptr<utility::io::FileIORead> m_file;
 };
 
 class LCEVCBinWriter
@@ -220,7 +221,7 @@ public:
     // This requires that a valid path is passed as an argument.
     //
     // \return Returns false if it fails, true otherwise.
-    bool initialise(const std::string& path);
+    bool initialise(const std::filesystem::path& path);
     void release();
 
     bool isValid() { return m_file && m_file->isValid(); }
@@ -234,10 +235,10 @@ private:
     bool writeFileHeader();
     bool writeBlockHeader(LCEVCBinBlockType blockType, uint32_t blockSize);
 
-    std::unique_ptr<io::FileIOWrite> m_file;
+    std::unique_ptr<utility::io::FileIOWrite> m_file;
     bool m_bWrittenHeader = false;
 };
 
-} // namespace vnova::utility
+} // namespace vnova::helper::bin
 
 #endif // VN_BIN_LCEVC_BIN_H_

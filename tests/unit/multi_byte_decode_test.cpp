@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -46,7 +46,7 @@ TEST(MultiByteDecode, SingleByte) // NOLINT
 {
     // 0x7F => 127
     Reader r{0x7F};
-    auto val = vnova::utility::MultiByte::decode([&]() { return r(); });
+    auto val = vnova::utility::MultiByte::Decode([&]() { return r(); });
     EXPECT_EQ(val, 127u);
 }
 
@@ -54,7 +54,7 @@ TEST(MultiByteDecode, TwoBytes128) // NOLINT
 {
     // 128 => 0x81 0x00 in big-endian VLQ (7-bit groups)
     Reader r{0x81, 0x00};
-    auto val = vnova::utility::MultiByte::decode([&]() { return r(); });
+    auto val = vnova::utility::MultiByte::Decode([&]() { return r(); });
     EXPECT_EQ(val, 128u);
 }
 
@@ -62,7 +62,7 @@ TEST(MultiByteDecode, TwoBytes255) // NOLINT
 {
     // 255 => 0x81 0x7F
     Reader r{0x81, 0x7F};
-    auto val = vnova::utility::MultiByte::decode([&]() { return r(); });
+    auto val = vnova::utility::MultiByte::Decode([&]() { return r(); });
     EXPECT_EQ(val, 255u);
 }
 
@@ -70,5 +70,5 @@ TEST(MultiByteDecode, OverflowThrowsOnSixthByte) // NOLINT
 {
     // More than 5 bytes should throw (e.g., 6 bytes total)
     Reader r{0x81, 0x80, 0x80, 0x80, 0x80, 0x00};
-    EXPECT_THROW((void)vnova::utility::MultiByte::decode([&]() { return r(); }), std::overflow_error);
+    EXPECT_THROW((void)vnova::utility::MultiByte::Decode([&]() { return r(); }), std::overflow_error);
 }

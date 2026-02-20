@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,23 +23,16 @@
 #ifndef VN_EXTRACTOR_EXTRACTOR_H_
 #define VN_EXTRACTOR_EXTRACTOR_H_
 
-#include "config.h"
-#include "helper/frame_queue.h"
+#include "app/config.h"
+#include "helper/extracted_frame.h"
 
 #include <cstdint>
-#include <limits>
-#include <vector>
+#include <optional>
+#include <unordered_map>
 
 namespace vnova::analyzer {
-struct LCEVC
-{
-    utility::DataBuffer data;
-    int64_t pts = (std::numeric_limits<int64_t>::max)();
-    int64_t dts = (std::numeric_limits<int64_t>::max)();
-    uint8_t maxReorderFrames = 0;
-    FrameType frameType = FrameType::Unknown;
-    int64_t frameSize = 0;
-};
+
+double normaliseFps(const double fps);
 
 // @brief Interface class used for extracting a block of raw LCEVC data from
 //        a source.
@@ -57,35 +50,64 @@ public:
 
     // @brief Reads a single frames worth of raw LCEVC data from the source
     // interface.
-    virtual bool next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBuffer) = 0;
-    virtual bool flush(FrameQueue& /*frameBuffer*/, std::vector<LCEVC>& /*lcevcFrames*/)
+    virtual bool next(std::vector<helper::LCEVCFrame>& lcevcFrames, helper::BaseFrameQueue& frameQueue) = 0;
+    virtual bool flush(helper::BaseFrameQueue& /*frameQueue*/, std::vector<helper::LCEVCFrame>& /*lcevcFrames*/)
     {
         return false;
     }
 
-    bool hasError() const noexcept { return bError; }
-    virtual bool getBaseStream() const noexcept { return bBaseStream; }
-    virtual bool getRawStream() const noexcept { return bRawStream; }
-    virtual bool getFourBytePrefix() const noexcept { return bFourBytePrefix; }
-    virtual uint8_t getLvccProfile() const noexcept { return lvccProfile; }
-    virtual uint8_t getLvccLevel() const noexcept { return lvccLevel; }
-    virtual bool isInitialized() const noexcept { return bInitialized; }
-    virtual bool hasLvccAtom() const noexcept { return bLvccPresent; }
+    uint64_t getTotalPacketSize() const noexcept;
+    std::optional<int64_t> getRemainingSizeForDts(const int64_t dts) const noexcept;
 
-    uint64_t baseFrameCount = 0;
-    uint64_t totalPacketSize = 0;
-    int64_t baseFps = 0;
-    double durationSec = 0;
+    bool getBaseStream() const noexcept { return m_hasBaseVideoStream; }
+    bool getBaseStreamSizeCountable() const noexcept { return m_baseVideoStreamIsSizeCountable; }
+    bool getError() const noexcept { return m_error; }
+    bool getInitialized() const noexcept { return m_initialized; }
+    bool getLvccPresent() const noexcept { return m_lvccPresent; }
+    bool getRawStream() const noexcept { return m_rawStream; }
+    bool getFourBytePrefix() const noexcept { return m_fourBytePrefix; }
+    double getDurationSec() const noexcept { return m_durationSec; }
+    std::optional<double> getBaseFramerate() const noexcept { return m_baseFramerate; }
+    void setBaseFramerate(double baseFramerate) noexcept
+    {
+        m_baseFramerate = normaliseFps(baseFramerate);
+    }
+    std::optional<double> getBaseTimebase() const noexcept
+    {
+        if (m_rawStream) {
+            if (m_baseFramerate.has_value() == false) {
+                return std::nullopt;
+            }
+            return 1.0 / m_baseFramerate.value();
+        }
+        return m_baseTimebase;
+    }
+    void setBaseTimebase(double baseTimebase) noexcept { m_baseTimebase = baseTimebase; }
+    uint64_t getBaseFrameCount() const noexcept { return m_decodedBaseFrameCount; }
+    uint8_t getLvccLevel() const noexcept { return m_lvccLevel; }
+    uint8_t getLvccProfile() const noexcept { return m_lvccProfile; }
 
 protected:
-    bool bError = false;
-    bool bInitialized = false;
-    bool bFourBytePrefix = false;
-    bool bBaseStream = false;
-    bool bRawStream = false;
-    bool bLvccPresent = false;
-    uint8_t lvccProfile = 0;
-    uint8_t lvccLevel = 0;
+    bool m_hasBaseVideoStream = false;
+    bool m_baseVideoStreamIsSizeCountable = false;
+    bool m_error = false;
+    bool m_fourBytePrefix = false;
+    bool m_initialized = false;
+    bool m_lvccPresent = false;
+    bool m_rawStream = false;
+    double m_durationSec = 0;
+    std::optional<double> m_baseFramerate = std::nullopt;
+    std::optional<double> m_baseTimebase = std::nullopt;
+    uint64_t m_decodedBaseFrameCount = 0;
+
+    // Sum of size of all packets for each DTS (size of both any base and LCEVC data).
+    std::unordered_map<int64_t, int64_t> m_totalSizeForDts;
+
+    // Start with packet size, subtract size of 1+ LCEVC frames in packet, remainder is base frame size.
+    std::unordered_map<int64_t, int64_t> m_remainingSizeForDts;
+
+    uint8_t m_lvccLevel = 0;
+    uint8_t m_lvccProfile = 0;
 };
 
 } // namespace vnova::analyzer

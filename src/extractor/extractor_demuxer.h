@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,9 +23,9 @@
 #ifndef VN_EXTRACTOR_EXTRACTOR_DEMUXER_H_
 #define VN_EXTRACTOR_EXTRACTOR_DEMUXER_H_
 
-#include "config.h"
+#include "app/config.h"
 #include "extractor.h"
-#include "helper/frame_queue.h"
+#include "helper/extracted_frame.h"
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -44,11 +44,15 @@ extern "C"
 #pragma warning(pop)
 #endif
 
-#include <memory>
-#include <string>
+#include <map>
+#include <set>
 
 namespace vnova::analyzer {
-enum NalUnitType : uint32_t
+
+constexpr int kLCEVCCodec = 54;
+constexpr int kBlockAdditionalLcevcId = 5;
+
+enum class NalUnitType : uint32_t
 {
     H264_NAL_UNIT_SEI = 6,
     HEVC_NAL_UNIT_PREFIX_SEI = 39,
@@ -87,59 +91,77 @@ struct LCEVCDecoderConfiguration
     std::vector<NALArray> arrays;
 };
 
+struct DemuxedFrame
+{
+    helper::LCEVCFrame lcevc;
+
+    int64_t decodeIndex = 0;
+
+    // Only finished frames are released to the lcevcFrames vector which links extraction to parsing.
+    // A frame is considered finished if it has a valid PTS (even synthesized for ES handling).
+    // This is because PTS is used to link an LCEVC frame to a base frame for e.g. size accounting.
+    bool finished = false;
+};
+using DemuxedFrameMap = std::unordered_map<int64_t, DemuxedFrame>;
+
 class ExtractorDemuxer : public Extractor
 {
 public:
-    ExtractorDemuxer(const std::string& url, InputType type, const Config& config);
-    ~ExtractorDemuxer();
+    ExtractorDemuxer(const std::filesystem::path& url, helper::InputType type, const Config& config);
+    ~ExtractorDemuxer() override;
 
-    bool next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBuffer) override;
-    bool flush(FrameQueue& frameBuffer, std::vector<LCEVC>& lcevcFrames) override;
+    bool next(std::vector<helper::LCEVCFrame>& lcevcFrames, helper::BaseFrameQueue& frameQueue) override;
+    bool flush(helper::BaseFrameQueue& frameQueue, std::vector<helper::LCEVCFrame>& lcevcFrames) override;
 
 private:
-    virtual bool processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lcevc,
-                                utility::BaseType::Enum& baseType) = 0;
+    virtual std::optional<helper::LCEVCFrame> parseNalIsLcevc(const utility::DataBuffer& nalUnit,
+                                                              helper::BaseType& baseType) = 0;
+    bool extractFromSingleTrack(const char* streamCodecName, const int streamPID);
+    bool extractFromSeparateTrack(const int streamPID);
+    bool extractLcevcMp4();
+    bool extractLcevcWebm();
+    bool extractLcevcStream(const int streamPID);
 
-    bool extractLCEVCMp4(std::vector<LCEVC>& lcevcFrames);
-    bool extractFromSeparateTrack(std::vector<LCEVC>& lcevcFrames, const int streamPID);
-    bool extractLCEVCWebm(std::vector<LCEVC>& lcevcFrames);
-    bool extractLCEVCData(std::vector<LCEVC>& lcevcFrames, const int streamPID);
+    bool processBaseFrame(const AVStream& stream, helper::BaseFrameQueue& frameQueue);
+    bool populateFrameInfo(AVCodecContext& codecCtx, helper::BaseFrameQueue& frameQueue);
+    void provideFrameInfoToLcevc(int64_t decodingIndex, const helper::BaseFrame& info);
+    bool handlePacketNalUnit(const utility::DataBuffer& nalBuffer);
 
-    bool extractFrameType(const AVStream& stream, FrameQueue& frameBuffer, std::vector<LCEVC>& lcevcFrames);
-    bool populateFrameInfo(AVCodecContext& codecCtx, FrameQueue& frameBuffer,
-                           std::vector<LCEVC>& lcevcFrames);
-    bool processNALFrameData(int64_t decodingIndex, FrameInfo& info, std::vector<LCEVC>& lcevcFrames);
-    bool handleNALUnit(const std::vector<uint8_t>& nalUnit, std::vector<LCEVC>& lcevcFrames);
-    void addLCEVCData(LCEVC& lcevc, std::vector<LCEVC>& lcevcFrames);
+    [[nodiscard]] bool storeLcevcFrame(helper::LCEVCFrame& lcevc);
+    bool releaseLcevcFrame(std::vector<helper::LCEVCFrame>& lcevcFrames);
+
     void determineStreamTypes();
-    bool validateLCEVCAnnexB();
-    static bool parseLvcCAtom(const uint8_t* data, size_t size, LCEVCDecoderConfiguration& config);
+    bool validateMp4IsNotAnnexB();
 
-    InputType m_inputType;
+    helper::InputType m_inputType;
 
     const Config& m_config;
     AVPacket* m_packet = nullptr;
     AVFormatContext* m_formatContext = nullptr;
 
-    utility::BaseType::Enum m_baseType = utility::BaseType::Enum::Unknown;
-    utility::DataBuffer m_nalUnit;
+    helper::BaseType m_baseType = helper::BaseType::UNKNOWN;
 
-    AVFrame* m_frame = nullptr;
     std::map<int, AVCodecContext*> m_codecContextMap;
-    std::map<int64_t, LCEVC> m_lcevcDataMap;
+    DemuxedFrameMap m_demuxedFrameMap;
+    std::map<int64_t, helper::BaseFrame> m_preParsedFrameInfo;
+
+    std::set<int64_t> m_releasedPtsTracker;
 
     bool m_isFlush = false;
-    int64_t m_maxReorder = 0;
-    int64_t m_dts = 0;
-    int64_t m_pts = 0;
-    int m_decodingIndex = 0;
-    int m_decodingCounter = 0;
-    int64_t m_packetCount = 0;
 
-    int m_lcevcStreamIndex = -1;
+    uint8_t m_maxReorder = 16; // H.264, HEVC, VVC max is 16
+
+    int64_t m_lcevcDecodeIndex = 0;
+    std::map<int, int64_t> m_baseDecodeIndex;
+
+    int64_t m_mapSearchIndex = 0;
+
+    std::optional<int> m_lcevcStreamIndex = std::nullopt;
+
+    // Any LCEVC data found in the stream for any frame - true once a single LCEVC packet seen.
     bool m_isLcevcFound = false;
-    int64_t m_pos = -1;
-    LCEVC m_lcevcAccumulator;
+
+    helper::LCEVCFrame m_lcevcAccumulator;
 };
 
 } // namespace vnova::analyzer

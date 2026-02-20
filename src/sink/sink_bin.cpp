@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,17 +22,16 @@
  */
 #include "sink_bin.h"
 
-#include "config.h"
-#include "extractor/extractor.h"
-#include "extractor/extractor_demuxer.h"
-#include "utility/nal_header.h"
+#include "app/config.h"
+#include "helper/nal_unit.h"
+#include "utility/log_util.h"
 
 #include <array>
 
 using namespace vnova::utility;
+using namespace vnova::helper;
 
 namespace vnova::analyzer {
-static constexpr std::array<uint8_t, 4> kAnnexBStartCode{0x00, 0x00, 0x00, 0x01};
 
 SinkBin::SinkBin(const Config& config)
     : Sink(config)
@@ -40,9 +39,8 @@ SinkBin::SinkBin(const Config& config)
 
 bool SinkBin::initialise()
 {
-    const auto& outputPath = config.outputPath;
-    if (!writer.initialise(outputPath)) {
-        VNLog::Error("Failed to initialise bin writer: %s\n", outputPath.c_str());
+    if (const auto& binOutputPath = config.extractOutputPath; writer.initialise(binOutputPath) == false) {
+        VNLOG_ERROR("Failed to initialise bin writer: %s", binOutputPath.c_str());
         return false;
     }
 
@@ -53,20 +51,21 @@ void SinkBin::release() { writer.release(); }
 
 void SinkBin::ConvertToAnnexB(std::vector<uint8_t>& data)
 {
-    uint32_t startCodeSize = 0;
-    if (matchAnnexBStartCode(data.data(), data.size(), startCodeSize)) {
+    uint8_t startCodeSize = 0;
+    if (helper::matchAnnexBStartCode(data.data(), data.size(), startCodeSize)) {
         // Already Annex B; leave untouched
         return;
     }
 
     // Otherwise, assume length-prefixed LCEVC; replace 4-byte length with Annex B prefix
     if (data.size() >= 4) {
-        data.erase(data.begin(), data.begin() + 4);
-        data.insert(data.begin(), kAnnexBStartCode.begin(), kAnnexBStartCode.end());
+        for (size_t idx = 0; idx < 4; idx++) {
+            data.at(idx) = static_cast<uint8_t>(helper::kFourByteStartCode.at(idx));
+        }
     }
 }
 
-bool SinkBin::write(const LCEVC& lcevc)
+bool SinkBin::write(const LCEVCFrame& lcevc)
 {
     if (!writer.isValid()) {
         return false;
@@ -75,7 +74,11 @@ bool SinkBin::write(const LCEVC& lcevc)
     std::vector<uint8_t> data = lcevc.data;
     ConvertToAnnexB(data);
 
-    LCEVCBinLCEVCPayload payload{};
+    VNLOG_INFO("Writing Annex-B formatted LCEVC frame %zu with size %zu bytes to file", m_index,
+               data.size());
+    m_index++;
+
+    helper::bin::LCEVCBinLCEVCPayload payload{};
     payload.presentationIndex = lcevc.pts;
     payload.decodeIndex = lcevc.dts;
     payload.data = data.data();

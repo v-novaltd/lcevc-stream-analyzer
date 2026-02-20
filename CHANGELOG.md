@@ -1,5 +1,5 @@
-#[[
-Copyright (C) 2014-2025 V-Nova International Limited
+<!--
+Copyright (C) 2014-2026 V-Nova International Limited
 
     * All rights reserved.
     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -19,16 +19,32 @@ Copyright (C) 2014-2025 V-Nova International Limited
 ANY ONWARD DISTRIBUTION, WHETHER STAND-ALONE OR AS PART OF ANY OTHER PROJECT,
 REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
 BSD-3-CLAUSE-CLEAR LICENSE.
-]]
+-->
+# Changelog
 
-add_executable(unit_tests)
+## 2.0.0
 
-target_link_libraries(unit_tests PRIVATE GTest::gtest GTest::gtest_main)
+### Features
+- Subcommand-based CLI to separate core ANALYZE/EXTRACT features from other new features
+- Improved JSON output hierarchy which closely matches LCEVC spec 
+- Clearer human-readable terminal output formatting
+- Warn user if inconsistent PTS value increment is detected
+- Warn user if the tool failed to parse all frames
+- Add network buffer simulation feature which can report plottable buffer fill over time data
 
-target_include_directories(unit_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../src"
-                                              "${CMAKE_CURRENT_LIST_DIR}/unit")
+### Fixes
+- Fix frame byte accounting and ordering logic
+- Correct reported base frame sizes and LCEVC frame association 
+- Correct summary bitrate calculations
+- Fix VVC NAL header decoding in MP4 files
 
-add_subdirectory(unit)
+### Dependencies / Compatibility
+- Bump FFmpeg to 8.0 to enable VVC frame type parsing
 
-include(GoogleTest)
-gtest_discover_tests(unit_tests)
+### Docs
+- Add "Quick start" section
+- Add subcommands explainer and update docs
+
+## 1.0.0
+
+Initial release.

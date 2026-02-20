@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -56,18 +56,18 @@ public:
         return *this;
     }
 
-    bool findEnum(E& res, const std::string& name, E failedReturn) const
+    bool FindEnum(E& res, const std::string& name, E failedReturn) const
     {
-        return BaseClass::findValue(res, name, failedReturn);
+        return BaseClass::FindValue(res, name, failedReturn);
     }
 
-    std::map<std::string, E, std::less<>> nameToValueMap(const E fallback) const
+    std::map<std::string, E, std::less<>> NameToValueMap(const E fallback) const
     {
         E value;
         std::map<std::string, E, std::less<>> map;
-        auto strings = BaseClass::listStrings();
+        auto strings = BaseClass::ListStrings();
         for (const auto& string : strings) {
-            findEnum(value, string, fallback);
+            FindEnum(value, string, fallback);
             map[string] = value;
         }
         return map;

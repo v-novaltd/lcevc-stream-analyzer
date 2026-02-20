@@ -6,6 +6,7 @@ Checks: >
     -abseil-*,
     -altera-*,
     -android-*,
+    -boost-*,
     -cert-*,
     -fuchsia-*,
     -google-*,
@@ -43,6 +44,7 @@ WarningsAsErrors: >
     -abseil-*,
     -altera-*,
     -android-*,
+    -boost-*,
     -cert-*,
     -fuchsia-*,
     -google-*,
@@ -83,7 +85,7 @@ CheckOptions:
    - { key: readability-identifier-naming.ConstexprVariablePrefix, value: '' }
    - { key: readability-identifier-naming.EnumCase, value: CamelCase }
    - { key: readability-identifier-naming.EnumIgnoredRegexp, value: EILP_.*|LCEVC_.* }
-   - { key: readability-identifier-naming.EnumConstantCase, value: CamelCase }
+   - { key: readability-identifier-naming.EnumConstantCase, value: UPPER_CASE }
    - { key: readability-identifier-naming.EnumConstantIgnoredRegexp, value: ELIP_.*|LCEVC_.* }
    - { key: readability-identifier-naming.FunctionCase, value: camelBack }
    - { key: readability-identifier-naming.FunctionIgnoredRegexp, value: make_error_code|swap|to_string|EILP_.*|LCEVC_.* }
@@ -98,8 +100,8 @@ CheckOptions:
    - { key: readability-identifier-naming.PrivateMemberCase, value: camelBack }
    - { key: readability-identifier-naming.PrivateMemberPrefix, value: m_ }
    - { key: readability-identifier-naming.PublicMemberCase, value: camelBack }
-   - { key: readability-identifier-naming.ScopedEnumCase, value: CamelCase }
-   - { key: readability-identifier-naming.ScopedEnumConstantCase, value: CamelCase }
+   - { key: readability-identifier-naming.ScopedEnumCase, value: UPPER_CASE }
+   - { key: readability-identifier-naming.ScopedEnumConstantCase, value: UPPER_CASE }
    - { key: readability-identifier-naming.StructCase, value: CamelCase }
    - { key: readability-identifier-naming.StructIgnoredRegexp, value: EILP_.*|LCEVC_.* }
    - { key: readability-identifier-naming.TemplateParameterCase, value: CamelCase }

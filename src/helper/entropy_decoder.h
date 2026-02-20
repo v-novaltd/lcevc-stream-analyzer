@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,13 +23,15 @@
 #ifndef VN_HELPER_ENTROPY_DECODER_H_
 #define VN_HELPER_ENTROPY_DECODER_H_
 
-#include "parser/parser.h"
+#include "parser/parsed_types.h"
 #include "stream_reader.h"
 
-namespace vnova::analyzer {
-void entropyDecodeSizes(StreamReader& reader, uint32_t count,
-                        TiledSizeCompressionType::Enum compressionType, std::vector<uint32_t>& out);
+#include <vector>
 
-} // namespace vnova::analyzer
+namespace vnova::helper {
+void entropyDecodeSizes(StreamReader& reader, uint32_t count,
+                        analyzer::TiledSizeCompressionType compressionType, std::vector<uint32_t>& out);
+
+} // namespace vnova::helper
 
 #endif // VN_HELPER_ENTROPY_DECODER_H_

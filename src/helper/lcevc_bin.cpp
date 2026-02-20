@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -26,10 +26,11 @@
 #include "utility/log_util.h"
 
 #include <array>
+#include <cinttypes>
 #include <cstddef>
 #include <cstring>
 
-namespace vnova::utility {
+namespace vnova::helper::bin {
 static constexpr uint32_t kLCEVCBinMagicLength = 8;
 static constexpr uint8_t kLCEVCBinMagic[kLCEVCBinMagicLength] = {0x6C, 0x63, 0x65, 0x76,
                                                                  0x63, 0x62, 0x69, 0x6E};
@@ -39,7 +40,7 @@ namespace {
     // \brief Generic helper function for performing a big-endian read from
     //        a file.
     template <typename T>
-    bool fileReadBE(std::unique_ptr<io::FileIORead> const & file, T& value)
+    bool fileReadBE(std::unique_ptr<utility::io::FileIORead> const & file, T& value)
     {
         std::array<std::byte, sizeof(T)> buf{};
         if (file->read(buf.data(), buf.size()) != buf.size()) {
@@ -47,16 +48,16 @@ namespace {
         }
 
         std::memcpy(&value, buf.data(), buf.size());
-        value = ByteOrder<T>::toHost(value);
+        value = utility::ByteOrder<T>::ToHost(value);
         return true;
     }
 
     // \brief Generic helper function for performing a big-endian write to
     //        a file.
     template <typename T>
-    bool fileWriteBE(std::unique_ptr<io::FileIOWrite> const & file, T value)
+    bool fileWriteBE(std::unique_ptr<utility::io::FileIOWrite> const & file, T value)
     {
-        T networkValue = ByteOrder<T>::toNetwork(value);
+        T networkValue = utility::ByteOrder<T>::ToNetwork(value);
         std::array<std::byte, sizeof(T)> buf{};
         std::memcpy(buf.data(), &networkValue, buf.size());
         if (file->write(buf.data(), buf.size()) != buf.size()) {
@@ -92,7 +93,7 @@ namespace {
             T dataAsT;
             std::memcpy(&dataAsT, m_data, sizeof(T));
 
-            value = ByteOrder<T>::toHost(dataAsT);
+            value = utility::ByteOrder<T>::ToHost(dataAsT);
             m_data = next;
 
             return true;
@@ -107,17 +108,17 @@ namespace {
 
 LCEVCBinReader::~LCEVCBinReader() { release(); }
 
-bool LCEVCBinReader::initialise(const std::string& path)
+bool LCEVCBinReader::initialise(const std::filesystem::path& path)
 {
     if (path.empty()) {
-        VNLog::Error("Could not initialise LCEVCBinReader, filepath is not valid\n");
+        VNLOG_ERROR("Could not initialise LCEVCBinReader, filepath is not valid");
         return false;
     }
 
-    auto file = std::make_unique<io::FileIORead>(path);
+    auto file = std::make_unique<utility::io::FileIORead>(path);
 
     if (!file->isValid()) {
-        VNLog::Error("Failed to open LCEVC bin file for reading\n");
+        VNLOG_ERROR("Failed to open LCEVC bin file for reading");
         return false;
     }
 
@@ -126,28 +127,28 @@ bool LCEVCBinReader::initialise(const std::string& path)
 
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (file->read(reinterpret_cast<std::byte*>(magicMarker), kLCEVCBinMagicLength) != kLCEVCBinMagicLength) {
-        VNLog::Error("Failed to read magic marker\n");
+        VNLOG_ERROR("Failed to read magic marker");
         return false;
     }
 
     if (memcmp(kLCEVCBinMagic, magicMarker, kLCEVCBinMagicLength) != 0) {
-        VNLog::Error("LCEVC Bin unrecognised magic bytes received [0x%02x, 0x%02x, 0x%02x, "
-                     "0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x]\n",
-                     magicMarker[0], magicMarker[1], magicMarker[2], magicMarker[3], magicMarker[4],
-                     magicMarker[5], magicMarker[6], magicMarker[7]);
+        VNLOG_ERROR("LCEVC Bin unrecognised magic bytes received [0x%02x, 0x%02x, 0x%02x, "
+                    "0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x]",
+                    magicMarker[0], magicMarker[1], magicMarker[2], magicMarker[3], magicMarker[4],
+                    magicMarker[5], magicMarker[6], magicMarker[7]);
         return false;
     }
 
     // u32: Read version and ensure we support it.
     if (!fileReadBE(file, m_version)) {
-        VNLog::Error("Failed to read version\n");
+        VNLOG_ERROR("Failed to read version");
         return false;
     }
 
     if (m_version > kLCEVCBinVersion) {
-        VNLog::Error("Unsupported bin file version loaded. Loaded version: %u, "
-                     "supported version: %u\n",
-                     m_version, kLCEVCBinVersion);
+        VNLOG_ERROR("Unsupported bin file version loaded. Loaded version: %u, "
+                    "supported version: %u",
+                    m_version, kLCEVCBinVersion);
         return false;
     }
 
@@ -176,12 +177,12 @@ LCEVCBinReadResult LCEVCBinReader::readBlock(LCEVCBinBlock& data)
             return LCEVCBinReadResult::NoMore;
         }
 
-        VNLog::Error("Failed to read block type\n");
+        VNLOG_ERROR("Failed to read block type");
         return LCEVCBinReadResult::Fail;
     }
 
     if (!fileReadBE(m_file, blockSize)) {
-        VNLog::Error("Failed to read block size\n");
+        VNLOG_ERROR("Failed to read block size");
         return LCEVCBinReadResult::Fail;
     }
 
@@ -189,7 +190,7 @@ LCEVCBinReadResult LCEVCBinReader::readBlock(LCEVCBinBlock& data)
     data.blockType = static_cast<LCEVCBinBlockType>(blockType);
 
     if (data.blockType != LCEVCBinBlockType::LCEVCPayload) {
-        VNLog::Error("Unrecognised block type specified: %u\n", blockType);
+        VNLOG_ERROR("Unrecognised block type specified: %u", blockType);
         return LCEVCBinReadResult::Fail;
     }
 
@@ -203,8 +204,8 @@ LCEVCBinReadResult LCEVCBinReader::readBlock(LCEVCBinBlock& data)
         // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
 
         if (readAmount != blockSize) {
-            VNLog::Error("Failed to read block of size %u, only read %" PRIu64 " bytes\n",
-                         blockSize, readAmount);
+            VNLOG_ERROR("Failed to read block of size %u, only read %" PRIu64 " bytes", blockSize,
+                        readAmount);
             return LCEVCBinReadResult::Fail;
         }
     }
@@ -215,8 +216,8 @@ LCEVCBinReadResult LCEVCBinReader::readBlock(LCEVCBinBlock& data)
 bool LCEVCBinReader::parseBlockAsLCEVCPayload(const LCEVCBinBlock& data, LCEVCBinLCEVCPayload& destination)
 {
     if (data.blockType != LCEVCBinBlockType::LCEVCPayload) {
-        VNLog::Error("Failed to parse LCEVC payload since the blockType != "
-                     "LCEVCBinBlockType::LCEVCPayload\n");
+        VNLOG_ERROR("Failed to parse LCEVC payload since the blockType != "
+                    "LCEVCBinBlockType::LCEVCPayload");
         return false;
     }
 
@@ -230,13 +231,13 @@ bool LCEVCBinReader::parseBlockAsLCEVCPayload(const LCEVCBinBlock& data, LCEVCBi
 
     // i64:   decode_index
     if (!reader.ReadBE(decodeIndex)) {
-        VNLog::Error("Failed to parse LCEVC payload decode index from block\n");
+        VNLOG_ERROR("Failed to parse LCEVC payload decode index from block");
         return false;
     }
 
     // i64:   presentation_index
     if (!reader.ReadBE(presentationIndex)) {
-        VNLog::Error("Failed to parse LCEVC payload encode index from block\n");
+        VNLOG_ERROR("Failed to parse LCEVC payload encode index from block");
         return false;
     }
 
@@ -252,17 +253,17 @@ bool LCEVCBinReader::parseBlockAsLCEVCPayload(const LCEVCBinBlock& data, LCEVCBi
 
 LCEVCBinWriter::~LCEVCBinWriter() { release(); }
 
-bool LCEVCBinWriter::initialise(const std::string& path)
+bool LCEVCBinWriter::initialise(const std::filesystem::path& path)
 {
     if (path.empty()) {
-        VNLog::Error("Could not initialise LCEVCBinWriter, filepath is not valid\n");
+        VNLOG_ERROR("Could not initialise LCEVCBinWriter, filepath is not valid");
         return false;
     }
 
-    auto file = std::make_unique<io::FileIOWrite>(path);
+    auto file = std::make_unique<utility::io::FileIOWrite>(path);
 
     if (!file->isValid()) {
-        VNLog::Error("Failed to open LCEVC bin file for writing\n");
+        VNLOG_ERROR("Failed to open LCEVC bin file for writing");
         return false;
     }
 
@@ -289,26 +290,26 @@ bool LCEVCBinWriter::writeLCEVCPayload(const LCEVCBinLCEVCPayload& payload)
 
     // Write block data
     if (!writeBlockHeader(LCEVCBinBlockType::LCEVCPayload, blockSize)) {
-        VNLog::Error("Failed to write block header\n");
+        VNLOG_ERROR("Failed to write block header");
         return false;
     }
 
     // i64: decode_index
     if (!fileWriteBE(m_file, payload.decodeIndex)) {
-        VNLog::Error("Failed to write decode index\n");
+        VNLOG_ERROR("Failed to write decode index");
         return false;
     }
 
     // i64: presentation_index
     if (!fileWriteBE(m_file, payload.presentationIndex)) {
-        VNLog::Error("Failed to write presentation index\n");
+        VNLOG_ERROR("Failed to write presentation index");
         return false;
     }
 
     // bytes: lcevc_data
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (m_file->write(reinterpret_cast<const std::byte*>(payload.data), payload.dataSize) != payload.dataSize) {
-        VNLog::Error("Failed to write LCEVC payload data\n");
+        VNLOG_ERROR("Failed to write LCEVC payload data");
         return false;
     }
 
@@ -321,13 +322,13 @@ bool LCEVCBinWriter::writeFileHeader()
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     if (m_file->write(reinterpret_cast<const std::byte*>(kLCEVCBinMagic), kLCEVCBinMagicLength) !=
         kLCEVCBinMagicLength) {
-        VNLog::Error("Failed to write file header magic-marker\n");
+        VNLOG_ERROR("Failed to write file header magic-marker");
         return false;
     }
 
     // u32: Write version
     if (!fileWriteBE(m_file, kLCEVCBinVersion)) {
-        VNLog::Error("Failed to write version\n");
+        VNLOG_ERROR("Failed to write version");
         return false;
     }
 
@@ -339,7 +340,7 @@ bool LCEVCBinWriter::writeBlockHeader(LCEVCBinBlockType blockType, uint32_t bloc
 {
     // Check & write file header.
     if (!m_bWrittenHeader && !writeFileHeader()) {
-        VNLog::Error("Failed to write file header\n");
+        VNLOG_ERROR("Failed to write file header");
         return false;
     }
 
@@ -348,17 +349,17 @@ bool LCEVCBinWriter::writeBlockHeader(LCEVCBinBlockType blockType, uint32_t bloc
     // u16: Block type
     const auto blockTypeValue = static_cast<uint16_t>(blockType);
     if (!fileWriteBE(m_file, blockTypeValue)) {
-        VNLog::Error("Failed to write block type: %u\n", static_cast<uint32_t>(blockType));
+        VNLOG_ERROR("Failed to write block type: %u", static_cast<uint32_t>(blockType));
         return false;
     }
 
     // u32: Block size
     if (!fileWriteBE(m_file, blockSize)) {
-        VNLog::Error("Failed to write block size: %u\n", blockSize);
+        VNLOG_ERROR("Failed to write block size: %u", blockSize);
         return false;
     }
 
     return true;
 }
 
-} // namespace vnova::utility
+} // namespace vnova::helper::bin

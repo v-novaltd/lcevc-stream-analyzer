@@ -1,5 +1,5 @@
 #[[
-Copyright (C) 2014-2025 V-Nova International Limited
+Copyright (C) 2014-2026 V-Nova International Limited
 
     * All rights reserved.
     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,19 +23,13 @@ BSD-3-CLAUSE-CLEAR LICENSE.
 
 cmake_minimum_required(VERSION 3.19)
 
-option(VN_BUILD_BINARIES
-       "Build lcevc_stream_analyzer. Not required for unit tests." ON)
-option(VN_FFMPEG_DOWNLOAD
-       "Download prebuilt ffmpeg/libav binaries if not found." ON)
-option(VN_BUILD_UNIT_TESTS
-       "Build unit tests. Requires gtest library from Conan or pkg-config." OFF)
+option(VN_BUILD_BINARIES "Build lcevc_stream_analyzer. Not required for unit tests." ON)
+option(VN_FFMPEG_DOWNLOAD "Download prebuilt ffmpeg/libav binaries if not found." ON)
+option(VN_BUILD_UNIT_TESTS "Build unit tests. Requires gtest library from Conan or pkg-config." ON)
 
 include(cmake/project_version.cmake)
 
-message(
-  STATUS
-    "Using clang-tidy with settings (disabled if blank): ${CMAKE_CXX_CLANG_TIDY}"
-)
+message(STATUS "Using clang-tidy with settings (disabled if blank): ${CMAKE_CXX_CLANG_TIDY}")
 
 include(CMakeSources.cmake)
 
@@ -49,126 +43,136 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wall -Wextra -Wpedantic -Wno-gnu-zero-variadic-macro-arguments -fmacro-prefix-map=${CMAKE_CURRENT_LIST_DIR}/src/=)
 
-  if(NOT WIN32 AND NOT MSYS)
-    # TODO: Add -Werror here to get warnings as errors.
-    add_compile_options(-Werror)
-  endif()
+    if(NOT WIN32 AND NOT MSYS)
+        # TODO: Add -Werror here to get warnings as errors.
+        add_compile_options(-Werror)
+    endif()
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-  # TODO: Add /WX here to get warnings as errors.
-  add_compile_options(/W4)
+    # TODO: Add /WX here to get warnings as errors.
+    add_compile_options(/W4)
 else()
-  message(FATAL_ERROR "Unrecognized compiler ${CMAKE_CXX_COMPILER_ID}")
+    message(FATAL_ERROR "Unrecognized compiler ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
 # If Conan has generated CMake paths, include them so find_package works.
 if(EXISTS "${CMAKE_BINARY_DIR}/../conan_paths.cmake")
-  include("${CMAKE_BINARY_DIR}/../conan_paths.cmake")
-  set(VN_FFMPEG_DOWNLOAD OFF)
+    include("${CMAKE_BINARY_DIR}/../conan_paths.cmake")
+    set(VN_FFMPEG_DOWNLOAD OFF)
 endif()
 
 message("VN_FFMPEG_DOWNLOAD: ${VN_FFMPEG_DOWNLOAD}")
 
-if(VN_BUILD_BINARIES)
-  # Define the executable
-  add_executable(lcevc_stream_analyzer ${SOURCES})
+# Define the core library
+add_library(stream_analyzer ${SOURCES})
 
-  # Include directories
-  target_include_directories(lcevc_stream_analyzer
-                             PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src")
-  target_include_directories(lcevc_stream_analyzer
-                             PUBLIC "${CMAKE_CURRENT_LIST_DIR}/third_party")
+# Include directories
+target_include_directories(stream_analyzer PUBLIC "src")
+target_include_directories(stream_analyzer PUBLIC "third_party")
 
-  # Optional FFmpeg download fallback aligned with guide
-  find_package(ffmpeg)
-  if(${ffmpeg_FOUND})
-    message(
-      STATUS "Did not need to download FFmpeg binaries, as find_package worked")
+# Optional FFmpeg download fallback aligned with guide
+find_package(ffmpeg)
+if(${ffmpeg_FOUND})
+    message(STATUS "Did not need to download FFmpeg binaries, as find_package worked")
     target_link_libraries(
-      lcevc_stream_analyzer
-      PUBLIC ffmpeg::avcodec ffmpeg::avformat ffmpeg::avutil ffmpeg::swscale
-             ffmpeg::swresample)
+    stream_analyzer PUBLIC ffmpeg::avcodec ffmpeg::avformat ffmpeg::avutil ffmpeg::swscale
+                                 ffmpeg::swresample)
+
+    set(ffmpeg_BIN_DIRS "${ffmpeg_LIB_DIRS}/../bin")
+
     if(WIN32 OR MSYS)
-      install(
-        DIRECTORY "${ffmpeg_avcodec_LIB_DIRS}/../bin"
-        DESTINATION "${CMAKE_INSTALL_PREFIX}"
-        FILES_MATCHING
-        PATTERN "*.dll")
+        install(
+      DIRECTORY "${ffmpeg_BIN_DIRS}" # The libav dlls are found in the bin dir, not lib dir
+      DESTINATION "${CMAKE_INSTALL_PREFIX}"
+      FILES_MATCHING
+      PATTERN "*.dll")
     else()
-      file(
-        GLOB FFMPEG_LIB_GLOB
-        LIST_DIRECTORIES true
-        "${ffmpeg_avcodec_LIB_DIRS}/*.so*")
-      install(FILES ${FFMPEG_LIB_GLOB} TYPE LIB)
+        file(
+      GLOB FFMPEG_LIB_GLOB
+      LIST_DIRECTORIES true
+      "${ffmpeg_LIB_DIRS}/*.so*")
+        install(FILES ${FFMPEG_LIB_GLOB} TYPE LIB)
+
+        # Install ffmpeg binaries (ffmpeg, ffprobe) for functional testing
+
+        file(
+      GLOB FFMPEG_BIN_GLOB
+      LIST_DIRECTORIES true
+      "${ffmpeg_BIN_DIRS}/*ff*")
+        message("ffmpeg_BIN_DIRS: ${ffmpeg_BIN_DIRS}")
+        install(PROGRAMS ${FFMPEG_BIN_GLOB} TYPE BIN)
     endif()
 
-  elseif(VN_FFMPEG_DOWNLOAD AND NOT APPLE)
+elseif(VN_FFMPEG_DOWNLOAD AND NOT APPLE)
     message(STATUS "Downloading FFMPEG binaries")
     include(cmake/download_ffmpeg.cmake)
     set(FFMPEG_DIR "${CMAKE_BINARY_DIR}/ffmpeg")
-    download_ffmpeg("${FFMPEG_DIR}" 7.1)
-    target_include_directories(lcevc_stream_analyzer
-                               PUBLIC "${FFMPEG_DIR}/include")
+    download_ffmpeg("${FFMPEG_DIR}" 8.0)
+    target_include_directories(stream_analyzer PUBLIC "${FFMPEG_DIR}/include")
 
-    target_link_directories(lcevc_stream_analyzer PUBLIC "${FFMPEG_DIR}/lib")
+    target_link_directories(stream_analyzer PUBLIC "${FFMPEG_DIR}/lib")
 
-    target_link_libraries(lcevc_stream_analyzer PUBLIC avcodec avformat avutil
-                                                       swscale swresample)
+    target_link_libraries(stream_analyzer PUBLIC avcodec avformat avutil swscale swresample)
 
     if(WIN32 OR MSYS)
-      install(
-        DIRECTORY "${FFMPEG_DIR}/bin"
-        DESTINATION "${CMAKE_INSTALL_PREFIX}"
-        FILES_MATCHING
-        PATTERN "*.dll")
+        install(
+      DIRECTORY "${FFMPEG_DIR}/bin"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}"
+      FILES_MATCHING
+      PATTERN "*.dll")
     else()
-      file(
-        GLOB FFMPEG_LIB_GLOB
-        LIST_DIRECTORIES true
-        "${FFMPEG_DIR}/lib/*.so*")
-      install(FILES ${FFMPEG_LIB_GLOB} TYPE LIB)
+        file(
+      GLOB FFMPEG_LIB_GLOB
+      LIST_DIRECTORIES true
+      "${FFMPEG_DIR}/lib/*.so*")
+        install(FILES ${FFMPEG_LIB_GLOB} TYPE LIB)
     endif()
 
-  else()
+else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(
-      LIBAV
-      REQUIRED
-      IMPORTED_TARGET
-      libavformat
-      libavcodec
-      libswresample
-      libavutil)
-    target_link_libraries(lcevc_stream_analyzer PUBLIC PkgConfig::LIBAV)
+    LIBAV
+    REQUIRED
+    IMPORTED_TARGET
+    libavformat
+    libavcodec
+    libswresample
+    libavutil)
+    target_link_libraries(stream_analyzer PUBLIC PkgConfig::LIBAV)
 
-  endif()
+endif()
 
-  if(WIN32 OR MSYS)
-    target_link_libraries(lcevc_stream_analyzer PUBLIC ws2_32)
-  else()
-    target_link_libraries(lcevc_stream_analyzer PUBLIC dl)
-  endif()
+if(WIN32 OR MSYS)
+    target_link_libraries(stream_analyzer PUBLIC ws2_32)
+else()
+    target_link_libraries(stream_analyzer PUBLIC dl)
+endif()
 
-  install(TARGETS lcevc_stream_analyzer)
+if(VN_BUILD_BINARIES)
+    add_executable(lcevc_stream_analyzer ${EXE_SOURCES_CPP})
+    target_link_libraries(lcevc_stream_analyzer PUBLIC stream_analyzer)
+    install(TARGETS lcevc_stream_analyzer)
 endif()
 
 if(VN_BUILD_UNIT_TESTS)
-  message(STATUS "Unit tests enabled")
-  message(STATUS "ctest args: ${CMAKE_CTEST_ARGUMENTS}")
-  include(CTest)
-  enable_testing()
+    message(STATUS "Unit tests enabled")
+    message(STATUS "ctest args: ${CMAKE_CTEST_ARGUMENTS}")
+    include(CTest)
+    enable_testing()
 
-  if(WIN32)
-    include(cmake/download_gtest.cmake)
-    download_gtest()
-  else()
-    find_package(GTest REQUIRED)
-  endif()
+  find_package(GTest)
+  if(${GTest_FOUND})
+        message(STATUS "Found existing gtest")
+    else()
+        message(STATUS "Downloading gtest using fetch content")
+        include(cmake/download_gtest.cmake)
+        download_gtest()
+    endif()
 
-  add_subdirectory(tests)
+    add_subdirectory(tests/unit)
 
 else()
-  message(STATUS "Unit tests skipped")
+    message(STATUS "Unit tests skipped")
 endif()

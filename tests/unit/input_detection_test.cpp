@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -21,24 +21,33 @@
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
 
-#include "config_types.h"
-#include "utility/input_detection.h"
+#include "app/config_types.h"
+#include "helper/input_detection.h"
+#include "helper/nal_unit.h"
 
 #include <gtest/gtest.h>
 
 using namespace vnova::analyzer;
-using vnova::utility::BaseType;
+using vnova::helper::BaseType;
+using namespace vnova::helper; // NOLINT
 
 namespace {
+
 // Helper to build Annex B NALU with start code and header bytes
 std::vector<uint8_t> makeAnnexBNal(const std::vector<uint8_t>& body)
 {
-    static constexpr uint8_t startCode[] = {0x00, 0x00, 0x01};
     std::vector<uint8_t> data;
-    data.insert(data.end(), std::begin(startCode), std::end(startCode));
-    data.insert(data.end(), body.begin(), body.end());
+    data.reserve(kFourByteStartCode.size() + body.size());
+
+    for (const auto& value : kFourByteStartCode) {
+        data.push_back(static_cast<uint8_t>(value));
+    }
+    for (const auto& value : body) {
+        data.push_back(value);
+    }
     return data;
 }
+
 } // namespace
 
 TEST(InputDetection, DetectsBinMagic) // NOLINT
@@ -77,8 +86,8 @@ TEST(InputDetection, DetectsH264AnnexB) // NOLINT
     // H.264 header: forbidden_zero_bit=0 nal_ref_idc=3 nal_unit_type=7 (SPS)
     auto nalu = makeAnnexBNal({0x67, 0x00, 0x00});
     auto result = detectInputFormatFromMemory(nalu.data(), nalu.size());
-    EXPECT_EQ(result.inputType, InputType::ELEMENTARY);
-    EXPECT_EQ(result.baseType, BaseType::Enum::H264);
+    EXPECT_EQ(result.inputType, InputType::ES);
+    EXPECT_EQ(result.baseType, BaseType::H264);
     EXPECT_TRUE(result.isLikelyAnnexB);
 }
 
@@ -87,8 +96,8 @@ TEST(InputDetection, DetectsHevcAnnexB) // NOLINT
     // HEVC header: forbidden_zero_bit=0 nal_unit_type=33 (SPS), nuh_layer_id=0, temporal_id_plus1=1
     auto nalu = makeAnnexBNal({0x42, 0x01, 0x01});
     auto result = detectInputFormatFromMemory(nalu.data(), nalu.size());
-    EXPECT_EQ(result.inputType, InputType::ELEMENTARY);
-    EXPECT_EQ(result.baseType, BaseType::Enum::HEVC);
+    EXPECT_EQ(result.inputType, InputType::ES);
+    EXPECT_EQ(result.baseType, BaseType::HEVC);
     EXPECT_TRUE(result.isLikelyAnnexB);
 }
 
@@ -97,8 +106,8 @@ TEST(InputDetection, DetectsVvcAnnexB) // NOLINT
     // VVC header: forbidden_zero_bit=0 reserved=0 nuh_layer_id=0 nal_unit_type=15 (SPS), temporal_id_plus1=1
     auto nalu = makeAnnexBNal({0x00, 0x79}); // forbidden=0, reserved=0, layer=0, nal_type=15 (SPS), tid=1
     auto result = detectInputFormatFromMemory(nalu.data(), nalu.size());
-    EXPECT_EQ(result.inputType, InputType::ELEMENTARY);
-    EXPECT_EQ(result.baseType, BaseType::Enum::VVC);
+    EXPECT_EQ(result.inputType, InputType::ES);
+    EXPECT_EQ(result.baseType, BaseType::VVC);
     EXPECT_TRUE(result.isLikelyAnnexB);
 }
 
@@ -116,7 +125,7 @@ TEST(InputDetection, DetectsAvccLengthPrefixed) // NOLINT
     // length-prefixed H.264 SPS (4-byte length = 4)
     const uint8_t data[] = {0x00, 0x00, 0x00, 0x04, 0x67, 0x00, 0x00, 0x00};
     auto result = detectInputFormatFromMemory(data, sizeof(data));
-    EXPECT_EQ(result.inputType, InputType::ELEMENTARY);
-    EXPECT_EQ(result.baseType, BaseType::Enum::H264);
+    EXPECT_EQ(result.inputType, InputType::ES);
+    EXPECT_EQ(result.baseType, BaseType::H264);
     EXPECT_TRUE(result.isLikelyAvcc);
 }

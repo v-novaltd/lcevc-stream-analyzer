@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,12 +22,12 @@
  */
 
 /* Copyright (c) V-Nova International Limited 2025. All rights reserved. */
-#include "utility/input_detection.h"
+#include "helper/input_detection.h"
 
-#include "config_types.h"
+#include "app/config_types.h"
+#include "helper/base_type.h"
+#include "helper/nal_unit.h"
 #include "helper/stream_reader.h"
-#include "utility/base_type.h"
-#include "utility/nal_header.h"
 
 #include <algorithm>
 #include <array>
@@ -35,14 +35,14 @@
 #include <fstream>
 #include <vector>
 
-namespace vnova::analyzer {
+namespace vnova::helper {
 namespace {
-    using namespace vnova::utility;
+    using namespace vnova::helper;
     constexpr size_t kMaxProbeBytes = 4096;
 
     struct ElementaryProbeResult
     {
-        CodecType codec = CodecType::Unknown;
+        CodecType codec = CodecType::UNKNOWN;
         bool isAnnexB = false;
         bool isAvcc = false;
         size_t startCodeHits = 0;
@@ -166,7 +166,7 @@ namespace {
         if (best != scores.end() && best->value > 0) {
             return best->codec;
         }
-        return CodecType::Unknown;
+        return CodecType::UNKNOWN;
     }
 
     bool looksLikeAvccStream(const uint8_t* data, size_t size, CodecEvidence& evidence)
@@ -212,7 +212,7 @@ namespace {
         }
 
         for (size_t i = 0; i + 2 < size && positions.size() < maxCodes;) {
-            uint32_t startSize = 0;
+            uint8_t startSize = 0;
             if (matchAnnexBStartCode(data + i, size - i, startSize)) {
                 positions.push_back(i);
                 i += (startSize > 0) ? startSize : 1;
@@ -270,7 +270,7 @@ namespace {
 
         if (looksLikeAvccStream(data, size, evidence)) {
             result.codec = pickCodec(evidence);
-            result.isAvcc = result.codec != CodecType::Unknown;
+            result.isAvcc = result.codec != CodecType::UNKNOWN;
             return result;
         }
 
@@ -281,20 +281,20 @@ namespace {
     {
         switch (probe.codec) {
             case CodecType::H264:
-                detected.inputType = InputType::ELEMENTARY;
-                detected.baseType = BaseType::Enum::H264;
+                detected.inputType = InputType::ES;
+                detected.baseType = BaseType::H264;
                 break;
             case CodecType::HEVC:
-                detected.inputType = InputType::ELEMENTARY;
-                detected.baseType = BaseType::Enum::HEVC;
+                detected.inputType = InputType::ES;
+                detected.baseType = BaseType::HEVC;
                 break;
             case CodecType::VVC:
-                detected.inputType = InputType::ELEMENTARY;
-                detected.baseType = BaseType::Enum::VVC;
+                detected.inputType = InputType::ES;
+                detected.baseType = BaseType::VVC;
                 break;
             case CodecType::LCEVC:
                 detected.inputType = InputType::LCEVC;
-                detected.baseType = BaseType::Enum::Unknown;
+                detected.baseType = BaseType::UNKNOWN;
                 break;
             default: break;
         }
@@ -314,25 +314,25 @@ DetectedInputFormat detectInputFormatFromMemory(const uint8_t* data, size_t size
 
     if (hasBinMagic(data, size)) {
         detected.inputType = InputType::BIN;
-        detected.baseType = BaseType::Enum::Unknown;
+        detected.baseType = BaseType::UNKNOWN;
         return detected;
     }
 
     if (looksLikeMp4Ftyp(data, size)) {
         detected.inputType = InputType::MP4;
-        detected.baseType = BaseType::Enum::Unknown;
+        detected.baseType = BaseType::UNKNOWN;
         return detected;
     }
 
     if (looksLikeMpegTs(data, size)) {
         detected.inputType = InputType::TS;
-        detected.baseType = BaseType::Enum::Unknown;
+        detected.baseType = BaseType::UNKNOWN;
         return detected;
     }
 
     if (looksLikeEbml(data, size)) {
         detected.inputType = InputType::WEBM;
-        detected.baseType = BaseType::Enum::Unknown;
+        detected.baseType = BaseType::UNKNOWN;
         return detected;
     }
 
@@ -343,21 +343,21 @@ DetectedInputFormat detectInputFormatFromMemory(const uint8_t* data, size_t size
         // evidence pointed to LCEVC, promote to LCEVC raw stream.
         if (probe.codec == CodecType::LCEVC) {
             detected.inputType = InputType::LCEVC;
-            detected.baseType = BaseType::Enum::Unknown;
+            detected.baseType = BaseType::UNKNOWN;
         } else {
-            detected.inputType = InputType::ELEMENTARY;
-            detected.baseType = BaseType::Enum::Unknown;
+            detected.inputType = InputType::ES;
+            detected.baseType = BaseType::UNKNOWN;
         }
     }
     if (detected.inputType == InputType::Unknown && probe.isAvcc) {
-        detected.inputType = InputType::ELEMENTARY;
-        detected.baseType = BaseType::Enum::Unknown;
+        detected.inputType = InputType::ES;
+        detected.baseType = BaseType::UNKNOWN;
         detected.isLikelyAvcc = true;
     }
     return detected;
 }
 
-bool detectInputFormatFromFile(const std::string& path, DetectedInputFormat& outFormat)
+bool detectInputFormatFromFile(const std::filesystem::path& path, DetectedInputFormat& outFormat)
 {
     outFormat = DetectedInputFormat();
     if (path.empty()) {
@@ -382,4 +382,4 @@ bool detectInputFormatFromFile(const std::string& path, DetectedInputFormat& out
     return true;
 }
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -21,7 +21,7 @@
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
 
-#include "utility/nal_header.h"
+#include "helper/nal_unit.h"
 
 #include <gtest/gtest.h>
 
@@ -30,32 +30,16 @@
 #include <vector>
 
 using namespace vnova::utility; // NOLINT
+using namespace vnova::helper;  // NOLINT
 
 namespace {
-
-constexpr std::array<uint8_t, 3> kThreeByteStartCode{{0x00, 0x00, 0x01}};
-constexpr std::array<uint8_t, 4> kFourByteStartCode{{0x00, 0x00, 0x00, 0x01}};
-
-std::vector<uint8_t> withStartCode(const std::array<uint8_t, 3>& startCode,
-                                   std::initializer_list<uint8_t> payload)
-{
-    std::vector<uint8_t> data;
-    data.reserve(startCode.size() + payload.size());
-    for (uint8_t b : startCode) {
-        data.push_back(b);
-    }
-    for (uint8_t b : payload) {
-        data.push_back(b);
-    }
-    return data;
-}
 
 std::vector<uint8_t> withStartCode4(std::initializer_list<uint8_t> payload)
 {
     std::vector<uint8_t> data;
     data.reserve(kFourByteStartCode.size() + payload.size());
-    for (uint8_t b : kFourByteStartCode) {
-        data.push_back(b);
+    for (const auto b : kFourByteStartCode) {
+        data.push_back(static_cast<uint8_t>(b));
     }
     for (uint8_t b : payload) {
         data.push_back(b);
@@ -65,7 +49,15 @@ std::vector<uint8_t> withStartCode4(std::initializer_list<uint8_t> payload)
 
 std::vector<uint8_t> withStartCode3(std::initializer_list<uint8_t> payload)
 {
-    return withStartCode(kThreeByteStartCode, payload);
+    std::vector<uint8_t> data;
+    data.reserve(kThreeByteStartCode.size() + payload.size());
+    for (const auto b : kThreeByteStartCode) {
+        data.push_back(static_cast<uint8_t>(b));
+    }
+    for (uint8_t b : payload) {
+        data.push_back(b);
+    }
+    return data;
 }
 
 std::vector<uint8_t> makeVvcHeader(uint8_t nalType, uint8_t nuhLayerId, uint8_t temporalIdPlus1)
@@ -81,7 +73,7 @@ std::vector<uint8_t> makeVvcHeader(uint8_t nalType, uint8_t nuhLayerId, uint8_t 
 
 TEST(NalHeader, MatchAnnexBStartCode) // NOLINT
 {
-    uint32_t sc = 0;
+    uint8_t sc = 0;
     const auto four = withStartCode4({0x11});
     EXPECT_TRUE(matchAnnexBStartCode(four.data(), four.size(), sc));
     EXPECT_EQ(sc, 4u);
@@ -101,10 +93,10 @@ TEST(NalHeaderParse, AnnexBH264HeaderSizeAndFields) // NOLINT
 
     ParsedNALHeader header{};
     ASSERT_TRUE(parseAnnexBHeader(data.data(), data.size(), CodecType::H264, header));
-    EXPECT_EQ(header.startCode, AnnexBStartCode::Three);
+    EXPECT_EQ(header.startCode, AnnexBStartCode::ANNEX_B_3);
     EXPECT_EQ(header.headerSize, 4u);
     EXPECT_EQ(header.nalRefIdc, 3);
-    EXPECT_EQ(header.nalUnitType, 5);
+    EXPECT_EQ(header.nalUnitValue, 5);
 }
 
 TEST(NalHeaderParse, AnnexBLcevcValidHeader) // NOLINT
@@ -114,10 +106,10 @@ TEST(NalHeaderParse, AnnexBLcevcValidHeader) // NOLINT
 
     ParsedNALHeader header{};
     ASSERT_TRUE(parseAnnexBHeader(data.data(), data.size(), CodecType::LCEVC, header));
-    EXPECT_EQ(header.startCode, AnnexBStartCode::Three);
+    EXPECT_EQ(header.startCode, AnnexBStartCode::ANNEX_B_3);
     EXPECT_EQ(header.headerSize, 5u); // 3-byte start code + 2-byte header
     EXPECT_EQ(header.forbiddenZeroBit, 0);
-    EXPECT_EQ(header.nalUnitType, 21);
+    EXPECT_EQ(header.nalUnitValue, 21);
 }
 
 TEST(NalHeaderParse, AnnexBLcevcInvalidBitsFailParse) // NOLINT
@@ -135,9 +127,9 @@ TEST(NalHeaderParse, LengthPrefixedLcevcHeaderSize) // NOLINT
 
     ParsedNALHeader parsedHeader{};
     ASSERT_TRUE(parseLengthPrefixedHeader(header.data(), header.size(), CodecType::LCEVC, parsedHeader));
-    EXPECT_EQ(parsedHeader.startCode, AnnexBStartCode::None);
+    EXPECT_EQ(parsedHeader.startCode, AnnexBStartCode::NOT_ANNEX_B);
     EXPECT_EQ(parsedHeader.headerSize, 2u);
-    EXPECT_EQ(parsedHeader.nalUnitType, 21);
+    EXPECT_EQ(parsedHeader.nalUnitValue, 21);
 }
 
 TEST(NalHeaderParse, AnnexBInsufficientBytesFail) // NOLINT
@@ -152,10 +144,10 @@ TEST(NalHeaderParse, AnnexBH264SEIWithFourByteStartCode) // NOLINT
 {
     const auto nalu = withStartCode4({0x06}); // H264 SEI nal_unit_type = 6
     ParsedNALHeader header{};
-    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::Enum::H264, header));
+    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::H264, header));
     EXPECT_TRUE(isSEI(header));
     EXPECT_EQ(header.headerSize, 5u);
-    EXPECT_EQ(header.nalUnitType, 6u);
+    EXPECT_EQ(header.nalUnitValue, 6u);
 }
 
 TEST(NalHeaderParse, AnnexBHEVCSEI) // NOLINT
@@ -167,10 +159,10 @@ TEST(NalHeaderParse, AnnexBHEVCSEI) // NOLINT
     const auto nalu = withStartCode4({b0, b1});
 
     ParsedNALHeader header{};
-    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::Enum::HEVC, header));
+    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::HEVC, header));
     EXPECT_TRUE(isSEI(header));
     EXPECT_EQ(header.headerSize, 6u);
-    EXPECT_EQ(header.nalUnitType, type);
+    EXPECT_EQ(header.nalUnitValue, type);
     EXPECT_EQ(header.temporalIdPlus1, 1u);
 }
 
@@ -180,10 +172,10 @@ TEST(NalHeaderParse, AnnexBVVCSEI) // NOLINT
     const auto nalu = withStartCode4({0x00, static_cast<uint8_t>((23u << 3) | 0x01)});
 
     ParsedNALHeader header{};
-    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::Enum::VVC, header));
+    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::VVC, header));
     EXPECT_TRUE(isSEI(header));
     EXPECT_EQ(header.headerSize, 6u);
-    EXPECT_EQ(header.nalUnitType, 23u);
+    EXPECT_EQ(header.nalUnitValue, 23u);
     EXPECT_EQ(header.temporalIdPlus1, 1u);
 }
 
@@ -193,10 +185,10 @@ TEST(NalHeaderParse, AnnexBVVCSEIWithIds) // NOLINT
     const auto nalu = withStartCode4({vvcHeader[0], vvcHeader[1]});
 
     ParsedNALHeader header{};
-    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::Enum::VVC, header));
+    ASSERT_TRUE(parseAnnexBHeader(nalu.data(), nalu.size(), BaseType::VVC, header));
     EXPECT_TRUE(isSEI(header));
     EXPECT_EQ(header.headerSize, 6u);
-    EXPECT_EQ(header.nalUnitType, 23u);
+    EXPECT_EQ(header.nalUnitValue, 23u);
     EXPECT_EQ(header.nuhLayerId, 17u);
     EXPECT_EQ(header.temporalIdPlus1, 6u);
 }

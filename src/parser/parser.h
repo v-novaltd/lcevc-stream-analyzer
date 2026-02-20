@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,128 +23,102 @@
 #ifndef VN_PARSER_PARSER_H_
 #define VN_PARSER_PARSER_H_
 
-#include "config.h"
-#include "extractor/extractor.h"
+#include "app/config.h"
+#include "helper/nal_unit.h"
 #include "helper/stream_reader.h"
-#include "json.hpp"
+#include "parser/parsed_frame.h"
+#include "parser/parsed_types.h"
 #include "utility/format_attribute.h"
-#include "utility/nal_unit.h"
 
-#include <cstddef>
+#include <cstdio>
 #include <fstream>
+#include <map>
+#include <optional>
 
-using ordered_json = nlohmann::ordered_json;
+// Include order matters - optional before json
+#include <json.hpp>
 
 namespace vnova::analyzer {
-
-class FileError : public std::runtime_error
-{
-public:
-    FileError(const std::string& message)
-        : std::runtime_error(message)
-    {}
-};
-
-struct PlaneMode
-{
-    enum Enum
-    {
-        Y,
-        YUV,
-        Invalid
-    };
-
-    static Enum FromValue(uint8_t val);
-    static const char* ToString(Enum val);
-    static uint32_t getPlaneCount(Enum val);
-};
-
-struct TransformType
-{
-    enum class Enum
-    {
-        Transform2x2 = 0,
-        Transform4x4,
-        Invalid
-    };
-
-    static Enum FromValue(uint8_t val);
-    static const char* ToString(Enum val);
-    static uint32_t getCoeffGroupCount(Enum val);
-    static uint32_t getTUSize(Enum val);
-};
-
-struct TiledSizeCompressionType
-{
-    enum class Enum
-    {
-        None = 0,
-        Prefix,
-        PrefixDiff,
-        Invalid
-    };
-
-    static Enum FromValue(uint8_t val);
-    static const char* ToString(Enum val);
-};
 
 class Parser
 {
 public:
     explicit Parser(const Config& config);
-    ~Parser();
+    ~Parser() = default;
 
-    bool parse(const LCEVC& lcevc);
-    uint64_t getTotal() const { return m_total; }
-    bool isBaseStream = false;
-    bool isFourBytePrefix = false;
-    bool bLvccPresent = false;
-    uint8_t lvccProfile = 0;
-    uint8_t lvccLevel = 0;
-    uint64_t sublayer1Size = 0;
-    uint64_t sublayer2Size = 0;
-    uint64_t temporalSize = 0;
-    uint64_t lcevcLayerSize = 0;
+    std::optional<ParsedFrame> parse(const helper::LCEVCWithBase& lcevcWithBase);
+    void writeOut(FILE* file, const Summary& summary);
+
+    uint64_t getTotal() const { return m_frameCount; }
+    bool getIsBaseStreamSizeCountable() const noexcept { return m_isBaseStreamSizeCountable; }
+    void setIsBaseStreamSizeCountable(bool isBaseStreamSizeCountable) noexcept
+    {
+        m_isBaseStreamSizeCountable = isBaseStreamSizeCountable;
+    }
+    bool getLvccPresent() const noexcept { return m_bLvccPresent; }
+    void setLvccPresent(bool lvccPresent) noexcept { m_bLvccPresent = lvccPresent; }
+    uint8_t getLvccProfile() const noexcept { return m_lvccProfile; }
+    void setLvccProfile(uint8_t lvccProfile) noexcept { m_lvccProfile = lvccProfile; }
+    uint8_t getLvccLevel() const noexcept { return m_lvccLevel; }
+    void setLvccLevel(uint8_t lvccLevel) noexcept { m_lvccLevel = lvccLevel; }
+    uint64_t getSublayer1Size() const noexcept
+    {
+        const auto it = m_sublayerSizes.find(EncodedDataSubLayer::SUBLAYER_1);
+        return it == m_sublayerSizes.end() ? 0 : static_cast<uint64_t>(it->second);
+    }
+    uint64_t getSublayer2Size() const noexcept
+    {
+        const auto it = m_sublayerSizes.find(EncodedDataSubLayer::SUBLAYER_2);
+        return it == m_sublayerSizes.end() ? 0 : static_cast<uint64_t>(it->second);
+    }
+    uint64_t getTemporalSize() const noexcept
+    {
+        const auto it = m_sublayerSizes.find(EncodedDataSubLayer::TEMPORAL);
+        return it == m_sublayerSizes.end() ? 0 : static_cast<uint64_t>(it->second);
+    }
+    uint64_t getLcevcLayerSize() const noexcept { return m_lcevcLayerSize; }
 
 private:
-    bool parseSequenceConfig();
-    bool parseGlobalConfig();
-    bool parsePictureConfig();
-    bool parseEncodedData();
-    bool parseEncodedTileData(uint32_t blockSize);
-    bool parseAdditionalInfo(uint32_t blockSize);
+    // Output is implemented via utility/output_util.* to keep Parser logic focused on parsing.
+    VNAttributeFormat(printf, 2, 3) void Output(const char* fmt, ...);
+    VNAttributeFormat(printf, 2, 3) void OutputVerbose(const char* fmt, ...);
+
+    void OutputConfig(nlohmann::ordered_json json);
+    void OutputLayeredConfig(nlohmann::ordered_json jsonWithLayers);
+    static void printStreamSummary(FILE* file, const Summary& summary);
+
+    void printFrame(const ParsedFrame& data, helper::FrameTypeLCEVC nalType, int64_t lcevcRawSize);
+    std::optional<nlohmann::ordered_json> parseLCEVC(std::vector<uint8_t>& payloadBuffer,
+                                                     int64_t lcevcRawSize, helper::FrameTypeLCEVC nalType);
+
+    bool parseSequenceConfig(SequenceConfig& config);
+    bool parseGlobalConfig(GlobalConfig& config);
+    bool parsePictureConfig(PictureConfig& config, helper::FrameTypeLCEVC nalType);
+    bool parseEncodedData(EncodedData& config);
+    bool parseEncodedTileData(EncodedTileData& config, uint32_t blockSize);
+    bool parseAdditionalInfo(AdditionalInfo& config, uint32_t blockSize);
     bool parseSkipBlock(uint32_t blockSize);
     bool parseCompressedEntropyEnabledFlags(std::vector<uint8_t>& destination);
-    void checkProfileandLevel(uint8_t profile, uint8_t level) const;
-
-    // Template declarations
-    template <std::size_t N, typename... Args>
-    void Output(const char (&fmt)[N], Args&&... args);
-    template <std::size_t N, typename... Args>
-    void OutputVerbose(const char (&fmt)[N], Args&&... args);
+    bool checkProfileAndLevel(uint8_t profile, uint8_t level) const;
 
     const Config& m_config;
-    StreamReader m_reader;
+    helper::StreamReader m_reader;
     std::ofstream m_logFile;
-    ordered_json m_jsonLog;
-    ordered_json m_blockJson;
-    PlaneMode::Enum m_planeMode = PlaneMode::Invalid;
-    TransformType::Enum m_transformType = TransformType::Enum::Invalid;
-    uint8_t m_scalingModeLevel2 = 0;
-    uint16_t m_width = 0;
-    uint16_t m_height = 0;
-    uint16_t m_tileWidth = 0;
-    uint16_t m_tileHeight = 0;
-    uint8_t m_compressionEntropyEnabledPerTileFlag = 0;
-    TiledSizeCompressionType::Enum m_compressionTypeSizePerTile = TiledSizeCompressionType::Enum::Invalid;
-    bool m_bEnhancementEnabled = false;
-    bool m_globalConfigReceived = false;
-    bool m_temporalEnabled = false;
-    bool m_temporalSignaled = false;
-    uint64_t m_total = 1;
-    uint8_t m_bitstreamVersion = 0;
-    utility::lcevc::NalUnitType::Enum m_nalType = utility::lcevc::NalUnitType::Enum::Invalid;
-    uint8_t m_ditheringControlFlag = static_cast<uint8_t>(utility::lcevc::NalUnitType::Enum::Invalid);
+    Root m_jsonLog;
+    nlohmann::ordered_json m_blockJson;
+    std::optional<GlobalConfig> m_globalConfig = std::nullopt;
+    std::optional<PictureConfig> m_pictureConfig = std::nullopt;
+
+    uint64_t m_frameCount = 0;
+
+    bool m_ditheringControlFlagLast = false;
+
+    bool m_isBaseStreamSizeCountable = false;
+    bool m_bLvccPresent = false;
+    uint8_t m_lvccProfile = 0;
+    uint8_t m_lvccLevel = 0;
+    std::map<EncodedDataSubLayer, int64_t> m_sublayerSizes;
+    uint64_t m_lcevcLayerSize = 0;
 };
 
 } // namespace vnova::analyzer

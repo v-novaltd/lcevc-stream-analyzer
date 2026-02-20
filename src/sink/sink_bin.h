@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,7 +23,7 @@
 #ifndef VN_SINK_SINK_BIN_H_
 #define VN_SINK_SINK_BIN_H_
 
-#include "bin/lcevc_bin.h"
+#include "helper/lcevc_bin.h"
 #include "sink.h"
 
 namespace vnova::analyzer {
@@ -34,10 +34,10 @@ public:
 
     bool initialise() override;
     void release() override;
-    bool write(const LCEVC& lcevc) override;
+    bool write(const helper::LCEVCFrame& lcevc) override;
     static void ConvertToAnnexB(std::vector<uint8_t>& data);
 
-    utility::LCEVCBinWriter writer;
+    helper::bin::LCEVCBinWriter writer;
 };
 
 } // namespace vnova::analyzer

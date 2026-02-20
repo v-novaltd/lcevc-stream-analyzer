@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -21,38 +21,47 @@
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
 
-/* Copyright (c) V-Nova International Limited 2025. All rights reserved. */
-#ifndef VN_UTILITY_INPUT_DETECTION_H_
-#define VN_UTILITY_INPUT_DETECTION_H_
+#ifndef VN_PARSER_PARSED_FRAME_H_
+#define VN_PARSER_PARSED_FRAME_H_
 
-#include "config_types.h"
-#include "utility/base_type.h"
+#include "helper/extracted_frame.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
+#include <optional>
+#include <vector>
 
 namespace vnova::analyzer {
 
-enum class InputType;
-
-struct DetectedInputFormat
+struct ParsedFrame
 {
-    DetectedInputFormat() = default;
-
-    InputType inputType = InputType::Unknown;
-    utility::BaseType::Enum baseType = utility::BaseType::Enum::Invalid;
-    bool isLikelyAnnexB = false;
-    bool isLikelyAvcc = false;
+    size_t index = 0;
+    helper::LCEVCFrame lcevc{};
+    std::optional<helper::BaseFrame> base = std::nullopt;
+    int64_t lcevcWireSize = -1;
+    int64_t baseWireSize = -1;
+    int64_t combinedWireSize = -1;
 };
 
-// Attempts to detect the input format from a file on disk by examining the first few kilobytes.
-// Returns true if detection ran (i.e. the file could be opened and read).
-bool detectInputFormatFromFile(const std::string& path, DetectedInputFormat& outFormat);
+class ParsedFrameList
+{
+public:
+    // NOLINTBEGIN(readability-identifier-naming) - keep std::vector-like API
+    void push_back(const ParsedFrame& frame) { m_frames.push_back(frame); }
+    size_t size() const { return m_frames.size(); };
+    const ParsedFrame& at(const size_t index) const { return m_frames.at(index); };
+    // NOLINTEND(readability-identifier-naming)
 
-// Exposed for tests and in-memory probing.
-DetectedInputFormat detectInputFormatFromMemory(const uint8_t* data, size_t size);
+    std::optional<std::vector<int64_t>> GetPts() const;
+    std::vector<int64_t> GetLcevcBytes() const;
+    std::vector<int64_t> GetBaseBytes() const;
+    std::vector<int64_t> GetCombinedBytes() const;
+    std::optional<bool> HasBase() const;
+
+private:
+    std::vector<ParsedFrame> m_frames;
+};
 
 } // namespace vnova::analyzer
 
-#endif // VN_UTILITY_INPUT_DETECTION_H_
+#endif // VN_PARSER_PARSED_FRAME_H_

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,23 +23,21 @@
 #ifndef VN_HELPER_REORDER_H_
 #define VN_HELPER_REORDER_H_
 
-#include "extractor/extractor.h"
-#include "frame_queue.h"
+#include "helper/extracted_frame.h"
 
-#include <functional>
 #include <queue>
 
-namespace vnova::analyzer {
+namespace vnova::helper {
 class Reorder
 {
     struct PTSMinOrder
     {
-        bool operator()(const LCEVC& l, const LCEVC& r) const { return l.pts > r.pts; }
+        bool operator()(const LCEVCFrame& l, const LCEVCFrame& r) const { return l.pts > r.pts; }
     };
 
 public:
-    void enqueue(const LCEVC& lcevc);
-    bool dequeue(LCEVC& lcevc, FrameQueue& frameBuffer);
+    void enqueue(const LCEVCFrame& lcevc);
+    bool dequeue(LCEVCWithBase& lcevcWithBase, BaseFrameQueue& frameQueue);
 
     void setEndOfStream(bool endOfStream) noexcept { m_endOfStream = endOfStream; }
     void setRawstream(bool rawStream) noexcept { m_isRawStream = rawStream; }
@@ -48,7 +46,7 @@ public:
     bool getBasestream() noexcept { return m_isBaseStream; }
 
 private:
-    std::priority_queue<LCEVC, std::vector<LCEVC>, PTSMinOrder> m_data;
+    std::priority_queue<LCEVCFrame, std::vector<LCEVCFrame>, PTSMinOrder> m_data;
     int64_t m_lastPTS = 0;
     bool m_hasOutput = false;
     bool m_endOfStream = false;
@@ -57,6 +55,6 @@ private:
     bool m_isBaseStream = false;
 };
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper
 
 #endif // VN_HELPER_REORDER_H_

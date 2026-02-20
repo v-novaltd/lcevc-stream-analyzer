@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,31 +20,15 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#ifndef VN_UTILITY_BASE_TYPE_H_
-#define VN_UTILITY_BASE_TYPE_H_
 
-#include <string_view>
+#include "config.h"
+#include "parser/parsed_frame.h"
 
-namespace vnova::utility {
-struct BaseType
-{
-    enum class Enum
-    {
-        H264,
-        HEVC,
-        VVC,
-        VP8,
-        VP9,
-        AV1,
-        VC6,
-        Unknown,
-        Invalid
-    };
+namespace vnova::analyzer::simulate_buffer {
 
-    static Enum fromString(std::string_view str);
-    static const char* ToString(Enum type);
-};
+bool simulate(const Config& config, double timebase, const ParsedFrameList& parsedFrames);
 
-} // namespace vnova::utility
+void printFrame(const ParsedFrame& data, double lcevcFillLevel, double baseFillLevel,
+                double combinedFillLevel);
 
-#endif // VN_UTILITY_BASE_TYPE_H_
+} // namespace vnova::analyzer::simulate_buffer

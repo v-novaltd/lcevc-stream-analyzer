@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,44 +20,19 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#ifndef VN_SRC_CONFIG_H_
-#define VN_SRC_CONFIG_H_
 
-#include "cli11.hpp"
-#include "config_types.h"
-#include "utility/base_type.h"
-#include "utility/log_util.h"
-#include "utility/platform.h"
+#include "extractor/extractor.h"
+#include "helper/extracted_frame.h"
+#include "helper/frame_timestamp.h"
+#include "helper/reorder.h"
+#include "parser/parser.h"
 
-#include <fstream>
-#include <functional>
-#include <map>
-#include <optional>
-#include <sstream>
-#include <string>
-#include <vector>
+namespace vnova::analyzer::analyze {
 
-namespace vnova::analyzer {
+bool parseFrames(helper::Reorder& buffer, Parser& parser, const Extractor& extractor,
+                 helper::BaseFrameQueue& frameQueue, ParsedFrameList& parsedFrames);
+void configureFlags(Extractor const & extractor, helper::Reorder& buffer, Parser& parser);
+bool summarize(FILE* file, Extractor const & extractor, Parser& parser,
+               const helper::timestamp::TimestampStats& pts);
 
-struct Config
-{
-public:
-    std::string inputPath;
-    InputType inputType = InputType::Unknown;
-    int32_t tsPID = -1;
-
-    std::string outputPath;
-    OutputType outputType = OutputType::Unknown;
-
-    utility::BaseType::Enum baseType = utility::BaseType::Enum::Invalid;
-
-    std::string logPath;
-    LogFormat logFormat;
-    bool verboseOutput = false;
-};
-
-std::optional<const Config> parseArgs(CLI::App& app, int argc, char* argv[]);
-
-} // namespace vnova::analyzer
-
-#endif // VN_SRC_CONFIG_H_
+} // namespace vnova::analyzer::analyze

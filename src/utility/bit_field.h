@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -27,17 +27,16 @@
 
 #include <cstdint>
 
-namespace vnova {
+namespace vnova::utility {
 template <typename T>
 class BitfieldDecoder
 {
 public:
     explicit BitfieldDecoder(T value)
         : m_value(value)
-        , m_shiftAccumulator(0)
     {}
 
-    bool getBit()
+    bool GetBit()
     {
         VNAssert(static_cast<size_t>(m_shiftAccumulator + 1) <= (sizeof(T) * 8));
         const auto out = static_cast<bool>(m_value & 1);
@@ -47,7 +46,7 @@ public:
     }
 
     template <typename U>
-    U getField(uint8_t bitCount)
+    U GetField(uint8_t bitCount)
     {
         static_assert(sizeof(U) <= sizeof(T));
         const T bitMask = (1 << bitCount) - 1;
@@ -59,9 +58,9 @@ public:
         return value;
     }
 
-    uint8_t getShiftAccumulator() const { return m_shiftAccumulator; }
+    uint8_t GetShiftAccumulator() const { return m_shiftAccumulator; }
 
-    void reset(T value)
+    void Reset(T value)
     {
         m_value = value;
         m_shiftAccumulator = 0;
@@ -69,7 +68,7 @@ public:
 
 private:
     T m_value;
-    uint8_t m_shiftAccumulator;
+    uint8_t m_shiftAccumulator = 0;
 };
 
 template <typename T>
@@ -79,7 +78,7 @@ struct BitfieldReverseHelper
 template <>
 struct BitfieldReverseHelper<uint8_t>
 {
-    static uint8_t reverse(uint8_t value)
+    static uint8_t Reverse(uint8_t value)
     {
         value = ((value & 0xF0) >> 4) | ((value & 0x0F) << 4); // Swap nibbles.
         value = ((value & 0xCC) >> 2) | ((value & 0x33) << 2); // Swap pairs within nibbles.
@@ -89,9 +88,9 @@ struct BitfieldReverseHelper<uint8_t>
 };
 
 template <typename T>
-T BitfieldReverse(T value)
+T bitfieldReverse(T value)
 {
-    return BitfieldReverseHelper<T>::reverse(value);
+    return BitfieldReverseHelper<T>::Reverse(value);
 }
 
 template <typename T, bool REVERSE = true>
@@ -100,85 +99,84 @@ class BitfieldDecoderStream
 public:
     BitfieldDecoderStream(const T* bytes, uint32_t bytesCount)
         : m_readBitfield(0)
-        , m_currentByteIndex(0)
         , m_bytes(bytes)
         , m_bytesCount(bytesCount)
     {
         if (m_bytesCount > 0) {
             if constexpr (REVERSE) {
-                m_readBitfield.reset(BitfieldReverse(m_bytes[m_currentByteIndex]));
+                m_readBitfield.Reset(bitfieldReverse(m_bytes[m_currentByteIndex]));
             } else {
-                m_readBitfield.reset(m_bytes[m_currentByteIndex]);
+                m_readBitfield.Reset(m_bytes[m_currentByteIndex]);
             }
         }
     }
 
-    bool readBit()
+    bool ReadBit()
     {
-        const bool bitVal = m_readBitfield.getBit();
+        const bool bitVal = m_readBitfield.GetBit();
 
-        if (m_readBitfield.getShiftAccumulator() == 8) {
-            loadByte();
+        if (m_readBitfield.GetShiftAccumulator() == 8) {
+            LoadByte();
         }
 
         return bitVal;
     }
 
     template <typename ReturnType>
-    ReturnType readBits(uint8_t numBits)
+    ReturnType ReadBits(uint8_t numBits)
     {
         ReturnType inputValue = 0;
         while (numBits--) {
             inputValue = static_cast<ReturnType>(inputValue << 1) |
-                         static_cast<ReturnType>(readBit() ? 1 : 0);
+                         static_cast<ReturnType>(ReadBit() ? 1 : 0);
         }
 
         return inputValue;
     }
 
     template <typename ReturnType>
-    ReturnType readBytes()
+    ReturnType ReadBytes()
     {
-        const auto frontBits = static_cast<uint8_t>(8 - m_readBitfield.getShiftAccumulator());
-        const uint8_t backBits = m_readBitfield.getShiftAccumulator();
+        const auto frontBits = static_cast<uint8_t>(8 - m_readBitfield.GetShiftAccumulator());
+        const uint8_t backBits = m_readBitfield.GetShiftAccumulator();
 
-        auto inputValue = static_cast<ReturnType>(m_readBitfield.template getField<uint8_t>(frontBits));
-        loadByte();
+        auto inputValue = static_cast<ReturnType>(m_readBitfield.template GetField<uint8_t>(frontBits));
+        LoadByte();
 
-        int8_t bitsRemaining = 8 * sizeof(ReturnType) - frontBits;
+        int8_t bitsRemaining = (8 * sizeof(ReturnType)) - frontBits;
         while (bitsRemaining >= 8) {
             inputValue = static_cast<ReturnType>(inputValue << 8) |
-                         static_cast<ReturnType>(m_readBitfield.template getField<uint8_t>(8));
+                         static_cast<ReturnType>(m_readBitfield.template GetField<uint8_t>(8));
             bitsRemaining -= 8;
-            loadByte();
+            LoadByte();
         }
-        VNAssert(backBits == bitsRemaining);
+        VNAssert(static_cast<int8_t>(backBits) == bitsRemaining);
         inputValue = static_cast<ReturnType>(inputValue << backBits) |
-                     static_cast<ReturnType>(m_readBitfield.template getField<uint8_t>(backBits));
+                     static_cast<ReturnType>(m_readBitfield.template GetField<uint8_t>(backBits));
         return inputValue;
     }
 
 private:
-    void loadByte()
+    void LoadByte()
     {
         if (m_currentByteIndex < (m_bytesCount - 1)) {
             ++m_currentByteIndex;
             if constexpr (REVERSE) {
-                m_readBitfield.reset(BitfieldReverse(m_bytes[m_currentByteIndex]));
+                m_readBitfield.Reset(bitfieldReverse(m_bytes[m_currentByteIndex]));
             } else {
-                m_readBitfield.reset(m_bytes[m_currentByteIndex]);
+                m_readBitfield.Reset(m_bytes[m_currentByteIndex]);
             }
         } else {
-            m_readBitfield.reset(0);
+            m_readBitfield.Reset(0);
         }
     }
 
     BitfieldDecoder<T> m_readBitfield;
-    uint32_t m_currentByteIndex;
-    const T* m_bytes;
-    uint32_t m_bytesCount;
+    uint32_t m_currentByteIndex = 0;
+    const T* m_bytes = nullptr;
+    uint32_t m_bytesCount = 0;
 };
 
-} // namespace vnova
+} // namespace vnova::utility
 
 #endif // VN_UTILITY_BIT_FIELD_H_

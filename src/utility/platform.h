@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,12 +23,16 @@
 #ifndef VN_UTILITY_PLATFORM_H_
 #define VN_UTILITY_PLATFORM_H_
 
-#include "utility/types_util.h"
+#ifndef NOMINMAX
+// NOLINTNEXTLINE(readability-identifier-naming)
+#define NOMINMAX
+#endif
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <memory>
+#include <stdexcept>
 
 #define VNUnused(x) (void)(x)
 
@@ -36,9 +40,19 @@
 #define VNAssert(condition) assert((condition))
 
 namespace vnova::utility::file {
-uint64_t tellPosition(FILE* f);
-void seekToPosition(FILE* f, long long offset, int32_t origin);
-uint64_t getFileSize(FILE* f);
+
+class FileError : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
+
+uint64_t tellPosition(FILE* file);
+
+void seekToPosition(FILE* file, long long offset, int32_t origin);
+
+uint64_t getFileSize(FILE* file);
+
 } // namespace vnova::utility::file
 
 #endif // VN_UTILITY_PLATFORM_H_

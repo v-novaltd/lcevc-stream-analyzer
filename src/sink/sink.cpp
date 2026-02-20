@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,10 +22,11 @@
  */
 #include "sink.h"
 
-#include "config.h"
+#include "app/config.h"
 #include "sink_bin.h"
 #include "sink_null.h"
 #include "sink_raw.h"
+#include "utility/log_util.h"
 
 namespace vnova::analyzer {
 Sink::Sink(const Config& config)
@@ -34,23 +35,28 @@ Sink::Sink(const Config& config)
 
 std::unique_ptr<Sink> Sink::factory(const Config& config)
 {
-    const auto outputType = config.outputType;
+    // Always null sink if EXTRACT command not provided.
+    const auto outputType = (config.subcommand.at(Subcommand::EXTRACT) == true)
+                                ? config.extractOutputType
+                                : ExtractOutputType::Unknown;
     std::unique_ptr<Sink> sink;
 
     switch (outputType) {
-        case OutputType::Unknown: sink = std::make_unique<SinkNull>(config); break;
-        case OutputType::Bin: sink = std::make_unique<SinkBin>(config); break;
-        case OutputType::Raw: sink = std::make_unique<SinkRaw>(config, false); break;
-        case OutputType::LengthDelimited: sink = std::make_unique<SinkRaw>(config, true); break;
+        case ExtractOutputType::Unknown: sink = std::make_unique<SinkNull>(config); break;
+        case ExtractOutputType::Bin: sink = std::make_unique<SinkBin>(config); break;
+        case ExtractOutputType::Raw: sink = std::make_unique<SinkRaw>(config, false); break;
+        case ExtractOutputType::LengthDelimited:
+            sink = std::make_unique<SinkRaw>(config, true);
+            break;
     }
 
     if (!sink) {
-        VNLog::Error("Can't make sink, unrecognised output type specified\n");
+        VNLOG_ERROR("Can't make sink, unrecognised output type specified");
         return nullptr;
     }
 
     if (!sink->initialise()) {
-        VNLog::Error("Failed to initialise sink\n");
+        VNLOG_ERROR("Failed to initialise sink");
         return nullptr;
     }
 

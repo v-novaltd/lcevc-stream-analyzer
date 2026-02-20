@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -21,17 +21,14 @@
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
 
-// NOLINTNEXTLINE(readability-identifier-naming)
-#define NOMINMAX
 #include "entropy_decoder.h"
 
 #include <algorithm>
 #include <cassert>
-#include <limits>
 #include <stdexcept>
 #include <vector>
 
-namespace vnova::analyzer {
+namespace vnova::helper {
 // Number of bits used to store codes
 constexpr static unsigned bitWidth(unsigned size)
 {
@@ -231,7 +228,7 @@ enum class SizesState
 {
     LSB,
     MSB,
-    Count
+    COUNT
 };
 
 static uint8_t readSymbol(SymbolSourcePrefix& source, SizesState state)
@@ -284,7 +281,7 @@ static int16_t decodeSignedSize(SymbolSourcePrefix& source)
 }
 
 void entropyDecodeSizes(StreamReader& reader, uint32_t count,
-                        TiledSizeCompressionType::Enum compressionType, std::vector<uint32_t>& out)
+                        analyzer::TiledSizeCompressionType compressionType, std::vector<uint32_t>& out)
 {
     out.clear();
     out.reserve(count);
@@ -295,16 +292,16 @@ void entropyDecodeSizes(StreamReader& reader, uint32_t count,
     }
 
     // Read prefix coding tables
-    SymbolSourcePrefix source(static_cast<unsigned int>(SizesState::Count), reader);
+    SymbolSourcePrefix source(static_cast<unsigned int>(SizesState::COUNT), reader);
     source.Start();
 
     int64_t signedSize = 0;
 
     for (uint32_t i = 0; i < count; ++i) {
-        if (compressionType == TiledSizeCompressionType::Enum::Prefix) {
+        if (compressionType == analyzer::TiledSizeCompressionType::PREFIX_CODING) {
             out.push_back(decodeUnsignedSize(source));
         } else {
-            VNAssert(compressionType == TiledSizeCompressionType::Enum::PrefixDiff);
+            VNAssert(compressionType == analyzer::TiledSizeCompressionType::PREFIX_CODING_ON_DIFFERENCES);
             signedSize += decodeSignedSize(source);
 
             if (signedSize < 0 || signedSize > (std::numeric_limits<uint32_t>::max)()) {
@@ -316,4 +313,4 @@ void entropyDecodeSizes(StreamReader& reader, uint32_t count,
     }
 }
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper

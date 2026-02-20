@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -26,7 +26,8 @@
 #define __STDC_LIMIT_MACROS
 #define __STDC_FORMAT_MACROS
 
-#include <cinttypes>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -54,23 +55,27 @@
 #endif
 
 namespace vnova::utility {
-template <typename T>
-class Callback
-{
-public:
-    T callback = nullptr;
-    void* data = nullptr;
-};
 
 using DataBuffer = std::vector<uint8_t>;
 
-#if __cplusplus >= 201703L
-template <typename...>
-inline constexpr auto AlwaysFalse = false;
+template <typename... T>
+constexpr std::array<std::byte, sizeof...(T)> constructByteArray(T&&... args) noexcept
+{
+    return {std::byte(std::forward<T>(args))...};
+}
 
-template <auto...>
-inline constexpr auto AlwaysFalseValue = false;
-#endif
+template <typename T, std::size_t N>
+constexpr bool staticContains(const std::underlying_type_t<T> (&arr)[N], const T value)
+{
+    const auto underlyingValue = static_cast<std::underlying_type_t<T>>(value);
+    for (const auto& x : arr) {
+        if (x == underlyingValue) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace vnova::utility
 
 #endif // VN_UTILITY_TYPES_UTIL_H_

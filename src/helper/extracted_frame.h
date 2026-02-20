@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,36 +23,73 @@
 #ifndef VN_HELPER_FRAME_QUEUE_H_
 #define VN_HELPER_FRAME_QUEUE_H_
 
+#include "utility/types_util.h"
+
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <queue>
 
-namespace vnova::analyzer {
-enum class FrameType
+namespace vnova::helper {
+
+enum class FrameType : uint8_t
 {
     Unknown,
     I,
     P,
     B,
     KeyFrame,
-    InterFrame
+    InterFrame,
 };
 
-struct FrameInfo
+constexpr const char* toString(FrameType type)
 {
-    int64_t pts = (std::numeric_limits<int64_t>::max)();
-    int64_t frameNum = -1;
-    FrameType frameType = FrameType::Unknown;
-    uint64_t frameSize = (std::numeric_limits<uint64_t>::max)();
-};
-class FrameQueue
+    switch (type) {
+        case FrameType::I: return "I";
+        case FrameType::P: return "P";
+        case FrameType::B: return "B";
+        case FrameType::KeyFrame: return "KEY";
+        case FrameType::InterFrame: return "INT";
+        default: return " ? ";
+    }
+}
+
+struct BaseFrame
 {
-public:
-    void enqueue(const FrameInfo& info) { data.push(info); }
+    int64_t decodeIndex;
 
-    std::queue<FrameInfo> data;
+    int64_t dts;
+    int64_t pts;
+    int64_t index;
+    FrameType type;
+    int32_t width;
+    int32_t height;
+};
+static constexpr BaseFrame DEFAULT_FRAME_INFO = {-1, -1, -1, -1, FrameType::Unknown, -1, -1};
+
+using BaseFrameQueue = std::queue<BaseFrame>;
+
+constexpr int64_t kInvalidPts = std::numeric_limits<int64_t>::min();
+constexpr int64_t kInvalidDts = std::numeric_limits<int64_t>::min();
+
+struct LCEVCFrame
+{
+    uint8_t maxReorderFrames = 0;
+
+    utility::DataBuffer data;
+    int64_t pts = kInvalidPts;
+    int64_t dts = kInvalidDts;
+
+    int64_t lcevcWireSize = 0;
+    int64_t remainingWireSize = 0;
+    int64_t totalWireSize = 0;
 };
 
-} // namespace vnova::analyzer
+struct LCEVCWithBase
+{
+    LCEVCFrame lcevc;
+    std::optional<BaseFrame> base;
+};
+} // namespace vnova::helper
 
 #endif // VN_HELPER_FRAME_QUEUE_H_

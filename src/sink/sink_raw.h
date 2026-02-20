@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,8 +23,8 @@
 #ifndef VN_SINK_SINK_RAW_H_
 #define VN_SINK_SINK_RAW_H_
 
-#include "io/file_io.h"
 #include "sink.h"
+#include "utility/file_io.h"
 
 namespace vnova::analyzer {
 class SinkRaw final : public Sink
@@ -34,7 +34,7 @@ public:
 
     bool initialise() override;
     void release() override;
-    bool write(const LCEVC& lcevc) override;
+    bool write(const helper::LCEVCFrame& lcevc) override;
 
 private:
     std::unique_ptr<utility::io::FileIOWrite> m_file = nullptr;

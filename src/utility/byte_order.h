@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,8 +22,6 @@
  */
 #ifndef VN_UTILITY_BYTE_ORDER_H_
 #define VN_UTILITY_BYTE_ORDER_H_
-
-#include "utility/platform.h"
 
 // ntoh, hton
 #if defined(_WIN32) || defined(_WIN64)
@@ -60,66 +58,66 @@ namespace vnova::utility {
 template <typename T>
 struct ByteOrder
 {
-    static inline T toNetwork(T word);
-    static inline T toHost(T word);
+    static inline T ToNetwork(T word);
+    static inline T ToHost(T word);
 };
 
 template <>
-inline int64_t ByteOrder<int64_t>::toNetwork(int64_t hostBytes)
+inline int64_t ByteOrder<int64_t>::ToNetwork(int64_t hostBytes)
 {
     return static_cast<int64_t>(htonll(static_cast<uint64_t>(hostBytes)));
 }
 
 template <>
-inline uint64_t ByteOrder<uint64_t>::toNetwork(uint64_t hostBytes)
+inline uint64_t ByteOrder<uint64_t>::ToNetwork(uint64_t hostBytes)
 {
     return htonll(hostBytes);
 }
 
 template <>
-inline uint32_t ByteOrder<uint32_t>::toNetwork(uint32_t hostBytes)
+inline uint32_t ByteOrder<uint32_t>::ToNetwork(uint32_t hostBytes)
 {
     return htonl(hostBytes);
 }
 
 template <>
-inline uint16_t ByteOrder<uint16_t>::toNetwork(uint16_t hostBytes)
+inline uint16_t ByteOrder<uint16_t>::ToNetwork(uint16_t hostBytes)
 {
     return htons(hostBytes);
 }
 
 template <>
-inline uint8_t ByteOrder<uint8_t>::toNetwork(uint8_t hostBytes)
+inline uint8_t ByteOrder<uint8_t>::ToNetwork(uint8_t hostBytes)
 {
     return hostBytes;
 }
 
 template <>
-inline int64_t ByteOrder<int64_t>::toHost(int64_t hostBytes)
+inline int64_t ByteOrder<int64_t>::ToHost(int64_t hostBytes)
 {
     return static_cast<int64_t>(ntohll(static_cast<uint64_t>(hostBytes)));
 }
 
 template <>
-inline uint64_t ByteOrder<uint64_t>::toHost(uint64_t networkBytes)
+inline uint64_t ByteOrder<uint64_t>::ToHost(uint64_t networkBytes)
 {
     return ntohll(networkBytes);
 }
 
 template <>
-inline uint32_t ByteOrder<uint32_t>::toHost(uint32_t networkBytes)
+inline uint32_t ByteOrder<uint32_t>::ToHost(uint32_t networkBytes)
 {
     return ntohl(networkBytes);
 }
 
 template <>
-inline uint16_t ByteOrder<uint16_t>::toHost(uint16_t networkBytes)
+inline uint16_t ByteOrder<uint16_t>::ToHost(uint16_t networkBytes)
 {
     return ntohs(networkBytes);
 }
 
 template <>
-inline uint8_t ByteOrder<uint8_t>::toHost(uint8_t networkBytes)
+inline uint8_t ByteOrder<uint8_t>::ToHost(uint8_t networkBytes)
 {
     return networkBytes;
 }

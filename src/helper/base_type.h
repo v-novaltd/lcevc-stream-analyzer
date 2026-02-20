@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,56 +20,73 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
+#ifndef VN_UTILITY_BASE_TYPE_H_
+#define VN_UTILITY_BASE_TYPE_H_
 
-#include "base_type.h"
+#include <cstdint>
+#include <string_view>
 
-#include "string_util.h"
+namespace vnova::helper {
 
-namespace vnova::utility {
-BaseType::Enum BaseType::fromString(std::string_view str)
+enum class BaseType : int8_t
+{
+    INVALID = -2,
+    UNKNOWN = -1,
+    H264 = 1,
+    HEVC = 2,
+    VVC = 3,
+    VP8 = 4,
+    VP9 = 5,
+    AV1 = 6,
+    VC6 = 7,
+};
+
+constexpr BaseType baseTypeFromString(std::string_view str)
 {
     if (str == "h264" || str == "H264") {
-        return Enum::H264;
+        return BaseType::H264;
     }
     if (str == "hevc" || str == "HEVC") {
-        return Enum::HEVC;
+        return BaseType::HEVC;
     }
     if (str == "vvc" || str == "VVC") {
-        return Enum::VVC;
+        return BaseType::VVC;
     }
     if (str == "vp8" || str == "VP8") {
-        return Enum::VP8;
+        return BaseType::VP8;
     }
     if (str == "vp9" || str == "VP9") {
-        return Enum::VP9;
+        return BaseType::VP9;
     }
     if (str == "av1" || str == "AV1") {
-        return Enum::AV1;
+        return BaseType::AV1;
     }
     if (str == "vc6" || str == "VC6") {
-        return Enum::VC6;
+        return BaseType::VC6;
     }
     if (str == "unknown") {
-        return Enum::Unknown;
+        return BaseType::UNKNOWN;
     }
-    return BaseType::Enum::Invalid;
+    return BaseType::INVALID;
 }
 
-const char* BaseType::ToString(Enum type)
+constexpr const char* toString(const BaseType type)
 {
     switch (type) {
-        case Enum::H264: return "H264";
-        case Enum::HEVC: return "HEVC";
-        case Enum::VVC: return "VVC";
-        case Enum::VP8: return "VP8";
-        case Enum::VP9: return "VP9";
-        case Enum::AV1: return "AV1";
-        case Enum::VC6: return "VC6";
-        case Enum::Unknown: return "unknown";
-        case Enum::Invalid: return "invalid";
+        case BaseType::H264: return "H264";
+        case BaseType::HEVC: return "HEVC";
+        case BaseType::VVC: return "VVC";
+        case BaseType::VP8: return "VP8";
+        case BaseType::VP9: return "VP9";
+        case BaseType::AV1: return "AV1";
+        case BaseType::VC6: return "VC6";
+        case BaseType::UNKNOWN: return "UNKNOWN";
+        case BaseType::INVALID: return "INVALID";
     }
 
-    return "Unrecognized value";
+    return "INVALID";
 }
 
-} // namespace vnova::utility
+} // namespace vnova::helper
+
+#endif // VN_UTILITY_BASE_TYPE_H_

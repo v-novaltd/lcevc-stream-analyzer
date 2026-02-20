@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,11 +23,11 @@
 #ifndef VN_IO_FILE_IO_H_
 #define VN_IO_FILE_IO_H_
 
-#include "utility/platform.h"
+#include "utility/types_util.h"
 
 #include <cstddef>
 #include <cstdio>
-#include <optional>
+#include <filesystem>
 #include <string>
 
 namespace vnova::utility::io {
@@ -95,14 +95,14 @@ public:
         : FileIO(filename, mode, quiet)
     {}
     uint64_t read(std::byte* buffer, uint64_t size) override;
-    static bool readToBuffer(utility::DataBuffer& buffer, const std::string& filename);
+    static bool readToBuffer(utility::DataBuffer& buffer, const std::filesystem::path& filename);
     void reset();
 };
 class FileIORead : public FileIOReadRaw
 {
 public:
-    FileIORead(const std::string& filename, bool quiet = false)
-        : FileIOReadRaw(filename.c_str(), "rb", quiet)
+    FileIORead(const std::filesystem::path& filename, bool quiet = false)
+        : FileIOReadRaw(filename.string().c_str(), "rb", quiet)
     {}
 };
 
@@ -115,14 +115,15 @@ public:
     uint64_t write(const std::byte* buffer, uint64_t size) override;
     uint64_t write(const std::string& data);
     int flush() override;
-    static bool writeFromBuffer(const std::byte* buffer, uint64_t size, const std::string& filename);
+    static bool writeFromBuffer(const std::byte* buffer, uint64_t size,
+                                const std::filesystem::path& filename);
 };
 
 class FileIOWrite : public FileIOWriteRaw
 {
 public:
-    FileIOWrite(const std::string& filename, bool quiet = false, bool append = false)
-        : FileIOWriteRaw(filename.c_str(), !append ? "wb+" : "ab+", quiet)
+    FileIOWrite(const std::filesystem::path& filename, bool quiet = false, bool append = false)
+        : FileIOWriteRaw(filename.string().c_str(), !append ? "wb+" : "ab+", quiet)
     {}
 };
 

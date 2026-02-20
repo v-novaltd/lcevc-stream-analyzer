@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,512 +22,118 @@
  */
 #include "parser.h"
 
+#include "app/config_types.h"
 #include "helper/entropy_decoder.h"
-#include "helper/frame_queue.h"
+#include "helper/extracted_frame.h"
+#include "helper/nal_unit.h"
 #include "helper/stream_reader.h"
+#include "parser/parsed_types.h"
 #include "utility/bit_field.h"
+#include "utility/json_util.h"
 #include "utility/log_util.h"
 #include "utility/math_util.h"
+#include "utility/output_util.h"
 
+#include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cstdarg>
+#include <cstdint>
 #include <exception>
-#include <filesystem>
 #include <limits>
-#include <sstream>
+#include <optional>
 #include <vector>
 
+// Include order matters - optional before json
+#include <json.hpp>
+
 using namespace vnova::utility;
+using namespace vnova::helper;
+using vnova::utility::math::ceilDiv;
 
 namespace vnova::analyzer {
 namespace {
     constexpr int32_t kNumLevels = 2;
     constexpr uint8_t kSupportedVersion = 2;
 
-    struct BlockType
+    constexpr uint32_t getPlaneCount(const PlaneMode value)
     {
-        enum class Enum
-        {
-            SequenceConfig = 0,
-            GlobalConfig = 1,
-            PictureConfig = 2,
-            EncodedData = 3,
-            EncodedDataTiled = 4,
-            AdditionalInfo = 5,
-            Filler = 6,
-            Count
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Count)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Count;
+        switch (value) {
+            case PlaneMode::Y: return 1;
+            case PlaneMode::YUV: return 3;
+            case PlaneMode::UNKNOWN: VNAssert(false); break; // NOLINT(misc-static-assert)
         }
+        return 0;
+    }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 7> sNameLUT = {
-                "Sequence Config",    "Global Config",   "Picture Config", "Encoded Data",
-                "Encoded Tiled Data", "Additional Info", "Filler",
-            };
-
-            if (value < Enum::Count) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown block type";
-        }
-    };
-
-    struct ChromaSamplingType
+    constexpr uint32_t getCoeffGroupCount(const TransformType value)
     {
-        enum class Enum
-        {
-            Monochrome,
-            Chroma420,
-            Chroma422,
-            Chroma444,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
+        switch (value) {
+            case TransformType::TRANSFORM_2X2: return 4;
+            case TransformType::TRANSFORM_4X4: return 16;
+            case TransformType::UNKNOWN: VNAssert(false); break; // NOLINT(misc-static-assert)
         }
+        return 0;
+    }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 4> sNameLUT = {
-                "Monochrome",
-                "Chroma420",
-                "Chroma422",
-                "Chroma444",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown chroma sampling type";
-        }
-    };
-
-    struct BitDepthType
+    constexpr uint32_t getTUSize(const TransformType value)
     {
-        enum class Enum
-        {
-            Depth8 = 0,
-            Depth10,
-            Depth12,
-            Depth14,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
+        switch (value) {
+            case TransformType::TRANSFORM_2X2: return 2;
+            case TransformType::TRANSFORM_4X4: return 4;
+            case TransformType::UNKNOWN: VNAssert(false); break; // NOLINT(misc-static-assert)
         }
+        return 0;
+    }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 4> sNameLUT = {
-                "Depth8",
-                "Depth10",
-                "Depth12",
-                "Depth14",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown bit depth type";
-        }
-    };
-
-    struct UpsampleType
+    std::optional<std::array<uint16_t, 2>> getValidatedTileDimensions(const GlobalConfig& globalConfig)
     {
-        enum class Enum
-        {
-            Nearest = 0,
-            Bilinear,
-            Cubic,
-            ModifiedCubic,
-            AdaptiveCubic,
-
-            Count
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Count)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Count;
+        uint16_t tileWidth = 0;
+        uint16_t tileHeight = 0;
+        switch (globalConfig.tile_dimensions_type) {
+            case TilingMode::TILE_512X256:
+                tileWidth = 512;
+                tileHeight = 256;
+                break;
+            case TilingMode::TILE_1024X512:
+                tileWidth = 1024;
+                tileHeight = 512;
+                break;
+            case TilingMode::CUSTOM:
+                if (globalConfig.custom_tile.has_value()) {
+                    tileWidth = globalConfig.custom_tile->at(0);
+                    tileHeight = globalConfig.custom_tile->at(1);
+                }
+                break;
+            default: break;
         }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 5> sNameLUT = {
-                "Nearest", "Linear", "Cubic", "ModifiedCubic", "AdaptiveCubic",
-            };
-
-            if (value < Enum::Count) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown upsample type";
-        }
-    };
-
-    struct PictureType
-    {
-        enum class Enum
-        {
-            Frame = 0,
-            Field,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
+        if (tileWidth == 0 || tileHeight == 0) {
+            VNLOG_ERROR("tile dimensions are invalid, a dimension of 0 "
+                        "received from global "
+                        "config block, skipping block cannot determine number of "
+                        "tiles. tile_width: %u "
+                        "tile_height: %u",
+                        tileWidth, tileHeight);
+            return std::nullopt;
         }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 2> sNameLUT = {"Frame", "Field"};
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown picture type";
-        }
-    };
-
-    struct FieldType
-    {
-        enum class Enum
-        {
-            Top = 0,
-            Bottom,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
+        // NOLINTNEXTLINE(clang-analyzer-core.DivideZero)
+        if (const uint32_t tuSize = getTUSize(globalConfig.transform_type);
+            tileHeight % tuSize != 0 || tileWidth % tuSize != 0) {
+            VNLOG_ERROR("tile dimensions are invalid, tile dimension must be "
+                        "divisible by TU "
+                        "size. Skipping block. tile_width: %u "
+                        "tile_height: %u, TU size: %u",
+                        tileWidth, tileHeight, tuSize);
+            return std::nullopt;
         }
 
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 2> sNameLUT = {"Top", "Bottom"};
+        return std::array<uint16_t, 2>{tileWidth, tileHeight};
+    }
 
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown field type";
-        }
-    };
-
-    struct DitherType
-    {
-        enum class Enum
-        {
-            None = 0,
-            Uniform,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 2> sNameLUT = {"None", "Uniform"};
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown dither type";
-        }
-    };
-
-    struct ScalingMode
-    {
-        enum class Enum
-        {
-            Scaling0D = 0,
-            Scaling1D,
-            Scaling2D,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 3> sNameLUT = {
-                "0D",
-                "1D",
-                "2D",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown scaling mode";
-        }
-    };
-
-    struct TilingMode
-    {
-        enum class Enum
-        {
-            None = 0,
-            Tile512x256,
-            Tile1024x512,
-            Custom,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 4> sNameLUT = {
-                "none",
-                "512x256",
-                "1024x512",
-                "custom",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown tiling mode";
-        }
-    };
-
-    struct UserDataMode
-    {
-        enum class Enum
-        {
-            Disabled = 0,
-            With2Bits,
-            With6Bits,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 3> sNameLUT = {
-                "Disabled",
-                "With 2-Bits",
-                "With 6-Bits",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown user data mode";
-        }
-    };
-
-    struct QuantMatrixMode
-    {
-        enum class Enum
-        {
-            UsePrevious = 0,
-            UseDefault,
-            CustomBoth,
-            CustomSublayer2,
-            CustomSublayer1,
-            CustomBothUnique,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 6> sNameLUT = {
-                "UsePrevious",       "UseDefault",        "CustomBoth",
-                "Custom Sublayer 2", "Custom Sublayer 1", "Custom Both Unique",
-            };
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown quant matrix mode";
-        }
-    };
-
-    struct AdditionalInfoType
-    {
-        enum class Enum
-        {
-            SEIPayload = 0,
-            VUIParameters = 1,
-            SFilter = 23,
-            BaseHash = 24,
-            HDR = 25,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            switch (value) {
-                case Enum::SEIPayload: return "SEI Payload";
-                case Enum::VUIParameters: return "VUI Parameters";
-                case Enum::SFilter: return "S-Filter";
-                case Enum::BaseHash: return "Base Hash";
-                case Enum::HDR: return "HDR";
-                case Enum::Invalid: break;
-            }
-
-            return "Unknown additional info type";
-        }
-    };
-
-    struct SEIPayloadType
-    {
-        enum class Enum
-        {
-            MasteringDisplayColourVolume = 1,
-            ContentLightLevelInfo = 2,
-            UserDataRegistered = 4,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value >= static_cast<uint8_t>(Enum::MasteringDisplayColourVolume) &&
-                value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            switch (value) {
-                case Enum::MasteringDisplayColourVolume: return "Mastering Display Colour Volume";
-                case Enum::ContentLightLevelInfo: return "Content Light Level Info";
-                case Enum::UserDataRegistered: return "User Data Registered";
-                case Enum::Invalid: break;
-            }
-
-            return "Unknown SEI Payload type";
-        }
-    };
-
-    struct SFilterMode
-    {
-        enum class Enum
-        {
-            Disabled = 0,
-            InLoop = 1,
-            OutOfLoop = 2,
-            Invalid
-        };
-
-        static Enum FromValue(uint8_t value)
-        {
-            if (value < static_cast<uint8_t>(Enum::Invalid)) {
-                return static_cast<Enum>(value);
-            }
-
-            return Enum::Invalid;
-        }
-
-        static const char* ToString(Enum value)
-        {
-            static constexpr std::array<const char*, 3> sNameLUT = {"Disabled", "InLoop", "OutOfLoop"};
-
-            if (value < Enum::Invalid) {
-                return sNameLUT[static_cast<uint8_t>(value)];
-            }
-
-            return "Unknown s-filter mode";
-        };
-    };
-
-    const uint8_t kBlockSizeTypeReserved = 6;
-    const uint8_t kBlockSizeTypeCustom = 7;
+    constexpr uint8_t kBlockSizeTypeReserved = 6;
+    constexpr uint8_t kBlockSizeTypeCustom = 7;
     constexpr std::array<uint32_t, 7> kBlockSizeTypeLUT = {
         0,         1, 2, 3, 4, 5,
         0xFFFFFFFF // reserved
@@ -535,40 +141,35 @@ namespace {
 
     struct SyntaxResolution
     {
-        SyntaxResolution(uint16_t width, uint16_t height)
-            : width(width)
-            , height(height)
-        {}
         uint16_t width;
         uint16_t height;
     };
 
-    const uint32_t kResolutionTypeCustom = 63;
-    const std::vector<SyntaxResolution> kResolutionTypeLUT = {
-        SyntaxResolution(0, 0), // Unused
-        SyntaxResolution(360, 200),   SyntaxResolution(400, 240),   SyntaxResolution(480, 320),
-        SyntaxResolution(640, 360),   SyntaxResolution(640, 480),   SyntaxResolution(768, 480),
-        SyntaxResolution(800, 600),   SyntaxResolution(852, 480),   SyntaxResolution(854, 480),
-        SyntaxResolution(856, 480),   SyntaxResolution(960, 540),   SyntaxResolution(960, 640),
-        SyntaxResolution(1024, 576),  SyntaxResolution(1024, 600),  SyntaxResolution(1024, 768),
-        SyntaxResolution(1152, 864),  SyntaxResolution(1280, 720),  SyntaxResolution(1280, 800),
-        SyntaxResolution(1280, 1024), SyntaxResolution(1360, 768),  SyntaxResolution(1366, 768),
-        SyntaxResolution(1400, 1050), SyntaxResolution(1440, 900),  SyntaxResolution(1600, 1200),
-        SyntaxResolution(1680, 1050), SyntaxResolution(1920, 1080), SyntaxResolution(1920, 1200),
-        SyntaxResolution(2048, 1080), SyntaxResolution(2048, 1152), SyntaxResolution(2048, 1536),
-        SyntaxResolution(2160, 1440), SyntaxResolution(2560, 1440), SyntaxResolution(2560, 1600),
-        SyntaxResolution(2560, 2048), SyntaxResolution(3200, 1800), SyntaxResolution(3200, 2048),
-        SyntaxResolution(3200, 2400), SyntaxResolution(3440, 1440), SyntaxResolution(3840, 1600),
-        SyntaxResolution(3840, 2160), SyntaxResolution(3840, 2400), SyntaxResolution(4096, 2160),
-        SyntaxResolution(4096, 3072), SyntaxResolution(5120, 2880), SyntaxResolution(5120, 3200),
-        SyntaxResolution(5120, 4096), SyntaxResolution(6400, 4096), SyntaxResolution(6400, 4800),
-        SyntaxResolution(7680, 4320), SyntaxResolution(7680, 4800),
+    constexpr uint32_t kResolutionTypeCustom = 63;
+    constexpr std::array<SyntaxResolution, 51> kResolutionTypeLUT = {
+        SyntaxResolution{0, 0}, // Unused
+        SyntaxResolution{360, 200},   SyntaxResolution{400, 240},   SyntaxResolution{480, 320},
+        SyntaxResolution{640, 360},   SyntaxResolution{640, 480},   SyntaxResolution{768, 480},
+        SyntaxResolution{800, 600},   SyntaxResolution{852, 480},   SyntaxResolution{854, 480},
+        SyntaxResolution{856, 480},   SyntaxResolution{960, 540},   SyntaxResolution{960, 640},
+        SyntaxResolution{1024, 576},  SyntaxResolution{1024, 600},  SyntaxResolution{1024, 768},
+        SyntaxResolution{1152, 864},  SyntaxResolution{1280, 720},  SyntaxResolution{1280, 800},
+        SyntaxResolution{1280, 1024}, SyntaxResolution{1360, 768},  SyntaxResolution{1366, 768},
+        SyntaxResolution{1400, 1050}, SyntaxResolution{1440, 900},  SyntaxResolution{1600, 1200},
+        SyntaxResolution{1680, 1050}, SyntaxResolution{1920, 1080}, SyntaxResolution{1920, 1200},
+        SyntaxResolution{2048, 1080}, SyntaxResolution{2048, 1152}, SyntaxResolution{2048, 1536},
+        SyntaxResolution{2160, 1440}, SyntaxResolution{2560, 1440}, SyntaxResolution{2560, 1600},
+        SyntaxResolution{2560, 2048}, SyntaxResolution{3200, 1800}, SyntaxResolution{3200, 2048},
+        SyntaxResolution{3200, 2400}, SyntaxResolution{3440, 1440}, SyntaxResolution{3840, 1600},
+        SyntaxResolution{3840, 2160}, SyntaxResolution{3840, 2400}, SyntaxResolution{4096, 2160},
+        SyntaxResolution{4096, 3072}, SyntaxResolution{5120, 2880}, SyntaxResolution{5120, 3200},
+        SyntaxResolution{5120, 4096}, SyntaxResolution{6400, 4096}, SyntaxResolution{6400, 4800},
+        SyntaxResolution{7680, 4320}, SyntaxResolution{7680, 4800},
     };
 
-    const uint32_t kVUIAspectRatioIDCExtendedSAR = 255;
+    constexpr uint32_t kVUIAspectRatioIDCExtendedSAR = 255;
 
-    constexpr uint32_t kT35CodeLength = 4;
-    constexpr uint8_t kT35VNovaCode[kT35CodeLength] = {0xb4, 0x00, 0x50, 0x00};
+    constexpr std::array<uint8_t, 4> kT35VNovaCode = {0xb4, 0x00, 0x50, 0x00};
 
     uint32_t calculateNumTilesLevel2(uint32_t width, uint32_t height, uint32_t tileWidth, uint32_t tileHeight)
     {
@@ -576,880 +177,712 @@ namespace {
     }
 
     uint32_t calculateNumTilesLevel1(uint32_t width, uint32_t height, uint32_t tileWidth,
-                                     uint32_t tileHeight, ScalingMode::Enum scalingModeLvl2)
+                                     uint32_t tileHeight, ScalingMode scalingModeLvl2)
     {
         switch (scalingModeLvl2) {
-            case ScalingMode::Enum::Scaling0D:
+            case ScalingMode::SCALING_0D:
                 return calculateNumTilesLevel2(width, height, tileWidth, tileHeight);
-            case ScalingMode::Enum::Scaling1D:
+            case ScalingMode::SCALING_1D:
                 return ceilDiv(ceilDiv(width, 2u), tileWidth) * ceilDiv(height, tileHeight);
-            case ScalingMode::Enum::Scaling2D:
+            case ScalingMode::SCALING_2D:
                 return ceilDiv(ceilDiv(width, 2u), tileWidth) * ceilDiv(ceilDiv(height, 2u), tileHeight);
-            case ScalingMode::Enum::Invalid: VNAssert(false); break; // NOLINT(misc-static-assert)
+            case ScalingMode::UNKNOWN: VNAssert(false); break; // NOLINT(misc-static-assert)
         }
         return 0;
     }
 
-    const char* frameTypeToString(FrameType type)
-    {
-        switch (type) {
-            case FrameType::I: return "I-frame";
-            case FrameType::P: return "P-frame";
-            case FrameType::B: return "B-frame";
-            case FrameType::KeyFrame: return "KeyFrame";
-            case FrameType::InterFrame: return "InterFrame";
-            case FrameType::Unknown: break;
-        }
-
-        return "Invalid Frame";
-    }
-
 } // namespace
-
-PlaneMode::Enum PlaneMode::FromValue(uint8_t val)
-{
-    if (val < static_cast<uint8_t>(Enum::Invalid)) {
-        return static_cast<Enum>(val);
-    }
-
-    VNAssert(false); // NOLINT(misc-static-assert)
-    return Enum::Invalid;
-}
-
-const char* PlaneMode::ToString(PlaneMode::Enum val)
-{
-    static constexpr std::array<const char*, 2> sPlaneModeLUT = {"Y", "YUV"};
-
-    if (val < Enum::Invalid) {
-        return sPlaneModeLUT[static_cast<uint8_t>(val)];
-    }
-
-    return "Unknown plane mode";
-}
-
-uint32_t PlaneMode::getPlaneCount(PlaneMode::Enum val)
-{
-    switch (val) {
-        case Enum::Y: return 1;
-        case Enum::YUV: return 3;
-        case Enum::Invalid: VNAssert(false); break; // NOLINT(misc-static-assert)
-    }
-
-    return 0;
-}
-
-TransformType::Enum TransformType::FromValue(uint8_t val)
-{
-    if (val < static_cast<uint8_t>(Enum::Invalid)) {
-        return static_cast<Enum>(val);
-    }
-
-    VNAssert(false); // NOLINT(misc-static-assert)
-    return Enum::Invalid;
-}
-
-const char* TransformType::ToString(TransformType::Enum val)
-{
-    static constexpr std::array<const char*, 2> sTransformTypeLUT = {"2x2", "4x4"};
-
-    if (val < Enum::Invalid) {
-        return sTransformTypeLUT[static_cast<uint8_t>(val)];
-    }
-
-    return "Unknown transform type";
-}
-
-uint32_t TransformType::getCoeffGroupCount(TransformType::Enum val)
-{
-    switch (val) {
-        case Enum::Transform2x2: return 4;
-        case Enum::Transform4x4: return 16;
-        case Enum::Invalid: VNAssert(false); break; // NOLINT(misc-static-assert)
-    }
-    return 0;
-}
-
-uint32_t TransformType::getTUSize(Enum val)
-{
-    switch (val) {
-        case Enum::Transform2x2: return 2;
-        case Enum::Transform4x4: return 4;
-        case Enum::Invalid: VNAssert(false); break; // NOLINT(misc-static-assert)
-    }
-    return 0;
-}
-
-TiledSizeCompressionType::Enum TiledSizeCompressionType::FromValue(uint8_t val)
-{
-    if (val < static_cast<uint8_t>(Enum::Invalid)) {
-        return static_cast<Enum>(val);
-    }
-
-    VNAssert(false); // NOLINT(misc-static-assert)
-    return Enum::Invalid;
-}
-
-const char* TiledSizeCompressionType::ToString(Enum val)
-{
-    static constexpr std::array<const char*, 3> sLUT = {"none", "prefix", "prefix_diff"};
-
-    if (val < Enum::Invalid) {
-        return sLUT[static_cast<uint8_t>(val)];
-    }
-
-    return "Unknown tiled size compression type";
-}
-
-const auto kToHex = [](uint8_t val) {
-    std::ostringstream oss;
-    oss << "0x" << std::uppercase << std::setfill('0') << std::hex << std::setw(2)
-        << static_cast<int>(val);
-    return oss.str();
-};
 
 Parser::Parser(const Config& config)
     : m_config(config)
 {
-    if (!config.logPath.empty()) {
-        m_logFile.open(config.logPath, std::ios::trunc);
+    if (!config.analyzeLogPath.empty()) {
+        m_logFile.open(config.analyzeLogPath, std::ios::trunc);
         if (!m_logFile.is_open()) {
-            VNLog::Error("Failed to open log file %s\n", config.logPath.c_str());
-            throw FileError("Failed to open log file");
+            VNLOG_ERROR("Failed to open log file %s", config.analyzeLogPath.c_str());
+            throw utility::file::FileError("Failed to open log file");
         }
     }
-    if (m_config.logFormat == LogFormat::JSON) {
-        m_jsonLog.clear();
-        m_jsonLog["frames"] = nlohmann::ordered_json::array();
-    }
+    m_jsonLog.version = config.version;
 }
 
-Parser::~Parser()
+std::optional<ParsedFrame> Parser::parse(const LCEVCWithBase& lcevcWithBase)
 {
-    if (m_config.logFormat == LogFormat::JSON) {
-        // Always dump to stdout for passing to other tools
-        try {
-            fprintf(stdout, "%s\n", m_jsonLog.dump(4).c_str());
-        } catch (const nlohmann::json::exception& e) {
-            VNLog::Error("Failed to dump json to stdout: %s\n", e.what());
+    const auto& lcevc = lcevcWithBase.lcevc;
+    const BaseFrame frame = lcevcWithBase.base.value_or(DEFAULT_FRAME_INFO);
+
+    const size_t lcevcPayloadSize = lcevc.data.size();
+    const auto* payloadHead = lcevc.data.data();
+    size_t headerSize = 0;
+
+    const auto nalType = parseHeaderAutoLCEVC(payloadHead, lcevcPayloadSize, headerSize);
+    if (nalType == FrameTypeLCEVC::INVALID) {
+        VNLOG_ERROR("Unrecognized LCEVC NAL unit type (neither IDR or Non-IDR)");
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> payloadBuffer(lcevcPayloadSize, 0);
+
+    payloadHead += headerSize;
+    const int64_t lcevcRawSize =
+        nalUnencapsulate(payloadBuffer.data(), payloadHead, lcevcPayloadSize - headerSize);
+
+    const int64_t lcevcWireSize =
+        lcevc.lcevcWireSize > 0 ? lcevc.lcevcWireSize : static_cast<int64_t>(lcevcPayloadSize);
+
+    // Sometimes the remainingWireSize is not available. Estimate the frame base size by subtracting lcevc size from the total packet size.
+    const int64_t fallbackBaseWireSize =
+        m_isBaseStreamSizeCountable ? (lcevc.totalWireSize - lcevcWireSize) : 0;
+    const int64_t baseWireSize =
+        lcevc.remainingWireSize > 0 ? lcevc.remainingWireSize : fallbackBaseWireSize;
+    const int64_t combinedWireSize = lcevcWireSize + baseWireSize;
+
+    if (baseWireSize < 0) {
+        VNLOG_DEBUG("Frame %" PRIu64 " had negative baseWireSize %" PRId64 "", m_frameCount, baseWireSize);
+        return std::nullopt;
+    }
+
+    m_lcevcLayerSize += lcevcPayloadSize;
+
+    ParsedFrame parsedFrame{
+        m_frameCount,
+        lcevc,
+        m_isBaseStreamSizeCountable ? std::make_optional(frame) : std::nullopt,
+        lcevcWireSize,
+        baseWireSize,
+        combinedWireSize,
+    };
+
+    if (m_config.subcommand.at(Subcommand::ANALYZE) == true) {
+        printFrame(parsedFrame, nalType, lcevcRawSize);
+    }
+
+    FrameBase jsonBase = {m_frameCount, std::string(toString(frame.type)),
+                          frame.dts,    frame.pts,
+                          frame.height, frame.width,
+                          baseWireSize, combinedWireSize};
+
+    FrameLCEVC jsonLCEVC = {toString(nalType), static_cast<int64_t>(lcevcPayloadSize), lcevcRawSize,
+                            lcevcWireSize};
+
+    m_frameCount += 1;
+
+    if (m_config.analyzeVerboseOutput) {
+        if (auto jsonOpt = parseLCEVC(payloadBuffer, lcevcRawSize, nalType); jsonOpt.has_value()) {
+            jsonLCEVC.blocks = jsonOpt.value();
+        } else {
+            return std::nullopt;
         }
+    } else {
+        // Just parse to gather e.g. layer size stats.
+        if (parseLCEVC(payloadBuffer, lcevcRawSize, nalType).has_value() == false) {
+            return std::nullopt;
+        }
+    }
+
+    m_jsonLog.frames.push_back(Frame{jsonBase, jsonLCEVC});
+
+    return parsedFrame;
+}
+
+void Parser::printStreamSummary(FILE* file, const Summary& summary)
+{
+    fprintf(file, VN_STR_0 "\n", "stream_summary");
+
+    if (summary.base.has_value()) {
+        fprintf(file, VN_STR_1 "%" PRId64 "\n", "base_frame_count", summary.base.value().frame_count);
+    } else {
+        fprintf(file, VN_STR_1 "%s\n", "base_frame_count", "N/A");
+    }
+
+    if (summary.framerate.has_value()) {
+        fprintf(file, VN_STR_1 "%.5f fps\n", "base_layer_framerate", summary.framerate.value());
+    } else {
+        fprintf(file, VN_STR_1 "%s\n", "base_layer_framerate", "N/A");
+    }
+
+    if (summary.base.has_value() && summary.base.value().layer_bitrate.has_value()) {
+        fprintf(file, VN_STR_1 "%.0f kbps\n", "base_layer_bitrate",
+                summary.base.value().layer_bitrate.value() / 1000.0);
+    } else {
+        fprintf(file, VN_STR_1 "%s\n", "base_layer_bitrate", "N/A");
+    }
+
+    if (summary.base.has_value()) {
+        fprintf(file, VN_STR_1 "%.0f kb\n", "base_layer_size",
+                static_cast<double>(summary.base.value().layer_size) / 1000.0);
+    } else {
+        fprintf(file, VN_STR_1 "%s\n", "base_layer_size", "N/A");
+    }
+
+    fprintf(file, VN_STR_1 "%" PRId64 "\n", "lcevc_frame_count", summary.lcevc.frame_count);
+    fprintf(file, VN_STR_1 "%.0f kb\n", "lcevc_layer_size",
+            static_cast<double>(summary.lcevc.layer_size) / 1000.0);
+    fprintf(file, VN_STR_2 "%.0f kb\n", "level_1_size",
+            static_cast<double>(summary.lcevc.level_1_size) / 1000.0);
+    fprintf(file, VN_STR_2 "%.0f kb\n", "level_2_size",
+            static_cast<double>(summary.lcevc.level_2_size) / 1000.0);
+    fprintf(file, VN_STR_2 "%.0f kb\n", "temporal_size",
+            static_cast<double>(summary.lcevc.temporal_size) / 1000.0);
+
+    if (summary.lcevc.layer_bitrate.has_value()) {
+        fprintf(file, VN_STR_1 "%.0f kbps\n", "lcevc_bitrate", summary.lcevc.layer_bitrate.value() / 1000.0);
+    } else {
+        fprintf(file, VN_STR_1 "%s\n", "lcevc_bitrate", "N/A");
+    }
+
+    if (summary.base.has_value()) {
+        fprintf(file, VN_STR_1 "%.3f\n", "lcevc_base_ratio", summary.base.value().lcevc_base_ratio);
+    } else {
+        fprintf(file, VN_STR_1 "%3s\n", "lcevc_base_ratio", "N/A");
+    }
+
+    fprintf(file, VN_STR_1 "%s\n", "pts_consistency", summary.pts.consistent ? "OK" : "FAILED");
+    fprintf(file, VN_STR_1 "%zu\n", "pts_interval_count", summary.pts.interval_count);
+}
+
+void Parser::writeOut(FILE* file, const Summary& summary)
+{
+    printStreamSummary(file, summary);
+
+    m_jsonLog.summary = summary;
+
+    if (m_config.analyzeLogFormat == LogFormat::JSON) {
+        const nlohmann::ordered_json jsonLog = m_jsonLog;
+        // Always dump to stdout for passing to other tools
+        utility::json::dump(stdout, jsonLog);
 
         // If a log path was set, also write it out to file
-        if (m_config.logPath.empty() == false) {
-            try {
-                m_logFile << m_jsonLog.dump(4) << std::endl;
-            } catch (const nlohmann::json::exception& e) {
-                VNLog::Error("Failed to dump json to file: %s\n", e.what());
-            }
+        if (m_config.analyzeLogPath.empty() == false) {
+            utility::json::write(m_config.analyzeLogPath, jsonLog);
         }
     }
 }
 
-bool Parser::parse(const LCEVC& lcevc)
+void Parser::printFrame(const ParsedFrame& data, const FrameTypeLCEVC nalType, const int64_t lcevcRawSize)
 {
-    m_blockJson.clear();
-    nlohmann::ordered_json jsonFrame;
-
-    if (isBaseStream) {
-        Output("Base : [Frame Type : %s, Frame Size : %" PRId64 "]\n",
-               frameTypeToString(lcevc.frameType), lcevc.frameSize);
-        jsonFrame["FrameType"] = frameTypeToString(lcevc.frameType);
-        jsonFrame["FrameSize"] = lcevc.frameSize;
+    if (data.base.has_value()) {
+        Output(VN_STR_0 "%10zu  |  LCEVC [%3s] dts:%10" PRId64 ", pts:%10" PRId64 ", siz:%10" PRId64
+                        "  |  BASE [%3s] dts:%10" PRId64 ", pts:%10" PRId64 ", siz:%10" PRId64
+                        "  |  COMBINED siz:%10" PRId64 "\n",
+               "frame", data.index, toString(nalType), data.lcevc.dts, data.lcevc.pts,
+               data.lcevcWireSize, toString(data.base.value().type), data.base.value().dts,
+               data.base.value().pts, data.baseWireSize, data.combinedWireSize);
+    } else {
+        Output(VN_STR_0 "%10zu  |  LCEVC [%3s] dts:%10" PRId64 ", pts:%10" PRId64 ", siz:%10" PRId64
+                        ", raw:%10" PRId64 "\n",
+               "frame", data.index, toString(nalType), data.lcevc.dts, data.lcevc.pts,
+               data.lcevcWireSize, lcevcRawSize);
     }
+}
 
-    lcevcLayerSize += lcevc.data.size();
-    Output("LCEVC Parse - [pts: %" PRId64 ", dts: %" PRId64 ", size: %u, count: %" PRId64 "]\n",
-           lcevc.pts, lcevc.dts, static_cast<uint32_t>(lcevc.data.size()), m_total++);
+std::optional<nlohmann::ordered_json> Parser::parseLCEVC(std::vector<uint8_t>& payloadBuffer,
+                                                         const int64_t lcevcRawSize,
+                                                         const FrameTypeLCEVC nalType)
+{
+    nlohmann::ordered_json blocksJson = nlohmann::ordered_json::array();
 
-    ordered_json lcevcJson;
-    lcevcJson["PTS"] = lcevc.pts;
-    lcevcJson["DTS"] = lcevc.dts;
-    lcevcJson["Size"] = static_cast<uint32_t>(lcevc.data.size());
-    lcevcJson["count"] = m_total - 1;
-
-    const auto* head = lcevc.data.data();
-
-    const uint32_t headerSize = isFourBytePrefix ? lcevc::kPrefixHeaderSize : lcevc::kHeaderSize;
-    m_nalType = lcevc::readNalHeader(head, lcevc.data.size(), headerSize);
-
-    if (m_nalType == lcevc::NalUnitType::Enum::Invalid) {
-        VNLog::Debug("\tERROR: Unrecognized NAL unit type");
-        return false;
-    }
-
-    std::vector<uint8_t> buffer(lcevc.data.size(), 0);
-
-    head += headerSize;
-    const auto length = nalUnencapsulate(buffer.data(), head, lcevc.data.size() - headerSize);
-
-    OutputVerbose("\tLCEVC %s NAL unit\n", lcevc::NalUnitType::ToString(m_nalType));
-    Output("\tRaw LCEVC data of size %u\n", length);
-
-    lcevcJson["NAL Type"] = lcevc::NalUnitType::ToString(m_nalType);
-    lcevcJson["RawSize"] = length;
-
-    ordered_json blocksJson = ordered_json::array();
-
-    m_reader.Reset(buffer.data(), length);
-    m_temporalSignaled = false;
+    m_reader.Reset(payloadBuffer.data(), lcevcRawSize);
 
     // Blocks
     while (m_reader.IsValid()) {
         // Block header.
         auto blockHeader = m_reader.ReadValue<uint8_t>();
-        uint8_t blockSizeType = ((blockHeader & 0xE0) >> 5);
+        uint8_t blockSizeType = ((blockHeader & 0xE0) >> 5); // blockHeader.11100000
         uint32_t blockSize = 0;
 
         if (blockSizeType == kBlockSizeTypeCustom) {
             blockSize = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
             if (blockSize == std::numeric_limits<uint32_t>::max()) {
-                VNLog::Error("\tERROR: Block size is max uint, this is likely wrong, check size "
-                             "type LUT is fully populated with latest values\n");
-                return false;
+                VNLOG_ERROR("Block size is max uint, this is likely wrong, check size "
+                            "type LUT is fully populated with latest values");
+                return std::nullopt;
             }
         } else if (blockSizeType == kBlockSizeTypeReserved) {
-            VNLog::Error("\tERROR: Reserved payload_size_type (%d)\n", kBlockSizeTypeReserved);
-            return false;
+            VNLOG_ERROR("Reserved payload_size_type (%" PRId32 ")", kBlockSizeTypeReserved);
+            return std::nullopt;
         } else if (blockSizeType < kBlockSizeTypeLUT.size()) {
             blockSize = kBlockSizeTypeLUT[blockSizeType];
         } else {
-            VNLog::Error("\tERROR: Unrecognised block size signaling\n");
-            return false;
+            VNLOG_ERROR("Unrecognised block size signaling");
+            return std::nullopt;
         }
 
-        BlockType::Enum blockType = BlockType::FromValue(blockHeader & 0x1F);
-
-        OutputVerbose("\t%s [size: %u, type: %u]\n", BlockType::ToString(blockType), blockSize,
-                      blockSizeType);
-
-        m_blockJson["BlockName"] = BlockType::ToString(blockType);
-        m_blockJson["Size"] = blockSize;
-        m_blockJson["Type"] = blockSizeType;
-
+        auto blockType = FromValue<BlockType>(blockHeader & 0x1F); // blockHeader.00011111
+        const auto payloadSizeType = static_cast<PayloadSizeType>(blockSizeType);
+        BaseConfig base{blockType, payloadSizeType, blockSize};
         uint64_t expectedPosition = m_reader.GetPosition() + blockSize;
-
         bool bBlockDecodeResult = true;
 
         switch (blockType) {
-            case BlockType::Enum::SequenceConfig: bBlockDecodeResult = parseSequenceConfig(); break;
-            case BlockType::Enum::GlobalConfig: bBlockDecodeResult = parseGlobalConfig(); break;
-            case BlockType::Enum::PictureConfig: bBlockDecodeResult = parsePictureConfig(); break;
-            case BlockType::Enum::EncodedData: bBlockDecodeResult = parseEncodedData(); break;
-            case BlockType::Enum::EncodedDataTiled:
-                bBlockDecodeResult = parseEncodedTileData(blockSize);
-                break;
-            case BlockType::Enum::AdditionalInfo:
-                bBlockDecodeResult = parseAdditionalInfo(blockSize);
-                break;
-            case BlockType::Enum::Filler: {
+            case BlockType::SEQUENCE_CONFIG: {
+                SequenceConfig config(base);
+                bBlockDecodeResult = parseSequenceConfig(config);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputConfig(config);
+                }
+            } break;
+            case BlockType::GLOBAL_CONFIG: {
+                GlobalConfig config(base);
+                bBlockDecodeResult = parseGlobalConfig(config);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputConfig(config);
+                }
+            } break;
+            case BlockType::PICTURE_CONFIG: {
+                PictureConfig config(base);
+                bBlockDecodeResult = parsePictureConfig(config, nalType);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputConfig(config);
+                }
+            } break;
+            case BlockType::ENCODED_DATA: {
+                EncodedData config(base);
+                bBlockDecodeResult = parseEncodedData(config);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputLayeredConfig(config);
+                }
+            } break;
+            case BlockType::ENCODED_TILED_DATA: {
+                EncodedTileData config(base);
+                bBlockDecodeResult = parseEncodedTileData(config, blockSize);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputLayeredConfig(config);
+                }
+            } break;
+            case BlockType::ADDITIONAL_INFO: {
+                AdditionalInfo config(base);
+                bBlockDecodeResult = parseAdditionalInfo(config, blockSize);
+                if (bBlockDecodeResult) {
+                    m_blockJson = nlohmann::ordered_json(config);
+                    OutputConfig(config);
+                }
+            } break;
+            case BlockType::FILLER: {
                 OutputVerbose("\tSkipping block\n");
                 parseSkipBlock(blockSize);
                 break;
             }
             default:
-                VNLog::Error("\tERROR: Failed to parse block of unknown type: %u\n", blockType);
-                return false;
+                VNLOG_ERROR("Failed to parse block of unknown type: %u", blockType);
+                return std::nullopt;
         }
 
         if (!bBlockDecodeResult) {
-            VNLog::Error("\tERROR: Failed to decode block [%u - %s] correctly\n", blockType,
-                         BlockType::ToString(blockType));
-            return false;
+            VNLOG_ERROR("Failed to decode block [%u - %s] correctly", blockType,
+                        ToString(blockType).c_str());
+            return std::nullopt;
         }
 
         if (expectedPosition != m_reader.GetPosition()) {
-            VNLog::Error("\tERROR: Failed to parse block [%s] correctly, offset is "
-                         "not what is "
-                         "expected: %" PRIu64 ", got: %" PRIu64 "\n",
-                         BlockType::ToString(blockType), expectedPosition, m_reader.GetPosition());
-            return false;
+            VNLOG_ERROR(
+                "Failed to parse %s block correctly, offset is not what is expected: %" PRIu64
+                ", got: %" PRIu64 "",
+                ToString(blockType).c_str(), expectedPosition, m_reader.GetPosition());
+            return std::nullopt;
         }
         blocksJson.push_back(m_blockJson);
         m_blockJson.clear();
     }
-    if (m_config.verboseOutput) {
-        lcevcJson["Blocks"] = blocksJson;
+
+    return blocksJson;
+}
+
+bool Parser::checkProfileAndLevel(uint8_t profile, uint8_t level) const
+{
+    if (profile != m_lvccProfile) {
+        VNLOG_WARN("Profile value differs from the lvcC Atom");
+        return false;
     }
-    jsonFrame["LCEVC"] = lcevcJson;
-
-    m_jsonLog["frames"].push_back(jsonFrame);
-
+    if (level != m_lvccLevel) {
+        VNLOG_WARN("Level value differs from the lvcC Atom");
+        return false;
+    }
     return true;
 }
 
-void Parser::checkProfileandLevel(uint8_t profile, uint8_t level) const
-{
-    if (profile != lvccProfile) {
-        VNLog::Info("\tWarning: Profile value differs from the lvcC Atom.\n");
-    }
-    if (level != lvccLevel) {
-        VNLog::Info("\tWarning: Level value differs from the lvcC Atom.\n");
-    }
-}
-
-bool Parser::parseSequenceConfig()
+bool Parser::parseSequenceConfig(SequenceConfig& config)
 {
     const auto field0 = m_reader.ReadValue<uint8_t>();
     const auto field1 = m_reader.ReadValue<uint8_t>();
+    const auto profileIdc = static_cast<uint8_t>((field0 & 0xF0) >> 4); // field0.11110000
+    const auto levelIdc = static_cast<uint8_t>(field0 & 0x0F);          // field0.00001111
 
-    const uint8_t profile = (field0 & 0xF0) >> 4;
-    const uint8_t level = (field0 & 0x0F);
-    const uint8_t sublevel = (field1 & 0xC0) >> 6;
-    const uint8_t window = (field1 & 0x20) >> 5;
-    const uint8_t seqReservedZeros5 = (field1 & 0x1F);
+    config.profile_idc = FromValue<ProfileType>(profileIdc);
+    config.level_idc = FromValue<LevelType>(levelIdc);
+    config.sublevel_idc = static_cast<SublevelType>((field1 & 0xC0) >> 6); // field1.11000000
+    config.conformance_window_flag = (field1 & 0x20) >> 5;                 // field1.00100000
 
-    if (bLvccPresent) {
-        checkProfileandLevel(profile, level);
+    if (const uint8_t seqReservedZeros5 = (field1 & 0x1F); // field1.00011111
+        seqReservedZeros5 != 0) {
+        VNLOG_WARN("Reserved bits (sequence_config) not zero: 0x%02x", seqReservedZeros5);
     }
 
-    OutputVerbose("\t\t%-20s| %u\n", "Profile", profile);
-    OutputVerbose("\t\t%-20s| %u.%u\n", "Level", level, sublevel);
-    OutputVerbose("\t\t%-20s| %u\n", "Window", window);
-    if (seqReservedZeros5 != 0) {
-        VNLog::Info("\tWarning: Reserved bits (sequence_config) not zero: 0x%02x\n", seqReservedZeros5);
+    if (m_bLvccPresent) {
+        checkProfileAndLevel(profileIdc, levelIdc);
     }
 
-    m_blockJson["Profile"] = profile;
-    m_blockJson["Level"] = level;
-    m_blockJson["SubLevel"] = sublevel;
-    m_blockJson["Window"] = window;
-
-    if (profile == 15 || level == 15) {
+    if (config.profile_idc == ProfileType::EXTENDED || config.level_idc == LevelType::EXTENDED) {
         const auto extField = m_reader.ReadValue<uint8_t>();
 
-        const uint8_t profileExt = (extField & 0xE0) >> 5;
-        const uint8_t levelExt = (extField & 0x1E) >> 1;
-        const uint8_t seqReservedZero1 = (extField & 0x01);
+        config.extended = SequenceConfigExt{};
+        config.extended->extended_profile_idc = (extField & 0xE0) >> 5; // extField.11100000
+        config.extended->extended_level_idc = (extField & 0x1E) >> 1;   // extField.00011110
 
-        OutputVerbose("\t\t%-20s| %u\n", "Profile Ext", profileExt);
-        OutputVerbose("\t\t%-20s| %u\n", "Level Ext", levelExt);
-
-        m_blockJson["ProfileExt"] = profileExt;
-        m_blockJson["LevelExt"] = levelExt;
+        const uint8_t seqReservedZero1 = (extField & 0x01); // extField.00000001
         if (seqReservedZero1 != 0) {
-            VNLog::Info("\tWarning: Reserved bit (sequence_config extension) not zero\n");
+            VNLOG_WARN("Reserved bit (sequence_config extension) not zero");
         }
     }
 
-    if (window) {
-        const auto left = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-        const auto right = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-        const auto top = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-        const auto bottom = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-
-        OutputVerbose("\t\t%-20s| %u\n", "Window Left", left);
-        OutputVerbose("\t\t%-20s| %u\n", "Window Right", right);
-        OutputVerbose("\t\t%-20s| %u\n", "Window Top", top);
-        OutputVerbose("\t\t%-20s| %u\n", "Window Bottom", bottom);
-
-        m_blockJson["WindowLeft"] = left;
-        m_blockJson["WindowRight"] = right;
-        m_blockJson["WindowTop"] = top;
-        m_blockJson["WindowBottom"] = bottom;
+    if (config.conformance_window_flag) {
+        config.conf_win = SequenceConfigWindow{};
+        config.conf_win->conf_win_left_offset = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
+        config.conf_win->conf_win_right_offset = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
+        config.conf_win->conf_win_top_offset = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
+        config.conf_win->conf_win_bottom_offset = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
     }
 
     return true;
 }
 
-bool Parser::parseGlobalConfig()
+bool Parser::parseGlobalConfig(GlobalConfig& config)
 {
     const auto field0 = m_reader.ReadValue<uint8_t>();
     const auto field1 = m_reader.ReadValue<uint8_t>();
     const auto field2 = m_reader.ReadValue<uint8_t>();
     const auto field3 = m_reader.ReadValue<uint8_t>();
 
-    const uint8_t planeModeFlag = (field0 & 0x80) >> 7;
-    const uint8_t resolutionType = (field0 & 0x7E) >> 1;
-    m_transformType = TransformType::FromValue(field0 & 0x01);
-    const ChromaSamplingType::Enum chromaSamplingType =
-        ChromaSamplingType::FromValue((field1 & 0xC0) >> 6);
-    const BitDepthType::Enum baseDepthType = BitDepthType::FromValue((field1 & 0x30) >> 4);
-    const BitDepthType::Enum enhancementDepthType = BitDepthType::FromValue((field1 & 0x0C) >> 2);
-    const uint8_t temporalStepWidthModifierEnabled = (field1 & 0x02) >> 1;
-    const uint8_t predictedAverage = (field1 & 0x01);
-    const uint8_t temporalReducedSignalling = (field2 & 0x80) >> 7;
-    const uint8_t temporalEnabled = (field2 & 0x40) >> 6;
-    const UpsampleType::Enum upsampleType = UpsampleType::FromValue((field2 & 0x38) >> 3);
-    const uint8_t deblocking = (field2 & 0x04) >> 2;
-    const ScalingMode::Enum scalingModeLevel1 = ScalingMode::FromValue(field2 & 0x03);
-    const ScalingMode::Enum scalingModeLevel2 = ScalingMode::FromValue((field3 & 0xC0) >> 6);
-    const TilingMode::Enum tilingMode = TilingMode::FromValue((field3 & 0x30) >> 4);
-    const UserDataMode::Enum userDataMode = UserDataMode::FromValue((field3 & 0x0C) >> 2);
-    const uint8_t level1DepthFlag = (field3 & 0x02) >> 1;
-    const uint8_t chromaMultiplierFlag = field3 & 0x01;
+    config.processed_planes_type_flag = ((field0 & 0x80) >> 7) != 0; // field0.10000000
+    config.resolution_type = (field0 & 0x7E) >> 1;                   // field0.01111110
+    config.transform_type = FromValue<TransformType>(field0 & 0x01); // field0.00000001
+    config.chroma_sampling_type = FromValue<ChromaSamplingType>((field1 & 0xC0) >> 6); // field1.11000000
+    config.base_depth_type = FromValue<BitDepthType>((field1 & 0x30) >> 4); // field1.00110000
+    config.enhancement_depth_type = FromValue<BitDepthType>((field1 & 0x0C) >> 2); // field1.00001100
+    config.temporal_step_width_modifier_signalled_flag = ((field1 & 0x02) >> 1) != 0; // field1.00000010
+    config.predicted_residual_mode_flag = (field1 & 0x01) != 0; // field1.00000001
+    config.temporal_tile_intra_signalling_enabled_flag = ((field2 & 0x80) >> 7) != 0; // field2.10000000
+    config.temporal_enabled_flag = ((field2 & 0x40) >> 6) != 0;                // field2.01000000
+    config.upsample_type = FromValue<UpsampleType>((field2 & 0x38) >> 3);      // field2.00111000
+    config.level1_filtering_signalled_flag = ((field2 & 0x04) >> 2) != 0;      // field2.00000100
+    config.scaling_mode_level1 = FromValue<ScalingMode>(field2 & 0x03);        // field2.00000011
+    config.scaling_mode_level2 = FromValue<ScalingMode>((field3 & 0xC0) >> 6); // field3.11000000
+    config.tile_dimensions_type = FromValue<TilingMode>((field3 & 0x30) >> 4); // field3.00110000
+    config.user_data_enabled = FromValue<UserDataMode>((field3 & 0x0C) >> 2);  // field3.00001100
+    config.level1_depth_flag = ((field3 & 0x02) >> 1) != 0;                    // field3.00000010
+    config.chroma_step_width_flag = (field3 & 0x01) != 0;                      // field3.00000001
 
-    m_scalingModeLevel2 = static_cast<uint8_t>(scalingModeLevel2);
-
-    uint8_t chromaSWMultiplier = 64;
-
-    OutputVerbose("\t\t%-20s| %u\n", "Plane mode flag", planeModeFlag);
-    OutputVerbose("\t\t%-20s| %u\n", "Resolution type", resolutionType);
-    OutputVerbose("\t\t%-20s| %s\n", "Transform type", TransformType::ToString(m_transformType));
-    OutputVerbose("\t\t%-20s| %s\n", "Chroma Sampling Type",
-                  ChromaSamplingType::ToString(chromaSamplingType));
-    OutputVerbose("\t\t%-20s| %s\n", "Base depth type", BitDepthType::ToString(baseDepthType));
-    OutputVerbose("\t\t%-20s| %s\n", "Enhancement depth type",
-                  BitDepthType::ToString(enhancementDepthType));
-    OutputVerbose("\t\t%-20s| %u\n", "Temporal Step Width Modifier", temporalStepWidthModifierEnabled);
-    OutputVerbose("\t\t%-20s| %u\n", "Predicted Average", predictedAverage);
-    OutputVerbose("\t\t%-20s| %u\n", "Temporal Reduced Signalling", temporalReducedSignalling);
-    OutputVerbose("\t\t%-20s| %u\n", "Temporal Enabled", temporalEnabled);
-    OutputVerbose("\t\t%-20s| %s\n", "Upsample type", UpsampleType::ToString(upsampleType));
-    OutputVerbose("\t\t%-20s| %u\n", "Deblocking", deblocking);
-    OutputVerbose("\t\t%-20s| %s\n", "Scaling Mode Level 1", ScalingMode::ToString(scalingModeLevel1));
-    OutputVerbose("\t\t%-20s| %s\n", "Scaling Mode Level 2", ScalingMode::ToString(scalingModeLevel2));
-    OutputVerbose("\t\t%-20s| %s\n", "Tiling Mode", TilingMode::ToString(tilingMode));
-    OutputVerbose("\t\t%-20s| %s\n", "User Data", UserDataMode::ToString(userDataMode));
-    OutputVerbose("\t\t%-20s| %u\n", "Level 1 Depth Flag", level1DepthFlag);
-
-    m_blockJson["Plane mode flag"] = planeModeFlag;
-    m_blockJson["Resolution type"] = resolutionType;
-    m_blockJson["Transform type"] = TransformType::ToString(m_transformType);
-    m_blockJson["Chroma Sampling Type"] = ChromaSamplingType::ToString(chromaSamplingType);
-    m_blockJson["Base depth type"] = BitDepthType::ToString(baseDepthType);
-    m_blockJson["Enhancement depth type"] = BitDepthType::ToString(enhancementDepthType);
-    m_blockJson["Temporal Step Width Modifier"] = temporalStepWidthModifierEnabled;
-    m_blockJson["Predicted Average"] = predictedAverage;
-    m_blockJson["Temporal Reduced Signalling"] = temporalReducedSignalling;
-    m_blockJson["Temporal Enabled"] = temporalEnabled;
-    m_blockJson["Upsample type"] = UpsampleType::ToString(upsampleType);
-    m_blockJson["Deblocking"] = deblocking;
-    m_blockJson["Scaling Mode Level 1"] = ScalingMode::ToString(scalingModeLevel1);
-    m_blockJson["Scaling Mode Level 2"] = ScalingMode::ToString(scalingModeLevel2);
-    m_blockJson["Tiling Mode"] = TilingMode::ToString(tilingMode);
-    m_blockJson["User Data"] = UserDataMode::ToString(userDataMode);
-    m_blockJson["Level 1 Depth Flag"] = level1DepthFlag;
-
-    if (planeModeFlag) {
+    if (config.processed_planes_type_flag) {
         const auto planeModeField = m_reader.ReadValue<uint8_t>();
-        m_planeMode = PlaneMode::FromValue((planeModeField & 0xF0) >> 4);
-        const auto planesReservedZeros4 = static_cast<uint8_t>(planeModeField & 0x0F);
+        config.planes_type = FromValue<PlaneMode>((planeModeField & 0xF0) >> 4); // planeModeField.11110000
+        const auto planesReservedZeros4 = static_cast<uint8_t>(planeModeField & 0x0F); // planeModeField.00001111
         if (planesReservedZeros4 != 0) {
-            VNLog::Info("\tWarning: Reserved bits (planes_type) not zero: 0x%02x\n", planesReservedZeros4);
+            VNLOG_WARN("Reserved bits (planes_type) not zero: 0x%02x", planesReservedZeros4);
         }
-    } else {
-        m_planeMode = PlaneMode::Y;
     }
-    OutputVerbose("\t\t%-20s| %s\n", "Plane mode", PlaneMode::ToString(m_planeMode));
-    m_blockJson["Plane mode"] = PlaneMode::ToString(m_planeMode);
 
     // Conditional stuff now
-    if (temporalStepWidthModifierEnabled) {
-        const auto temporalStepWidthModifier = m_reader.ReadValue<uint8_t>();
-        OutputVerbose("\t\t%-20s| %u\n", "Temporal Step Width Modifier", temporalStepWidthModifier);
-        m_blockJson["Temporal Step Width Modifier Value"] = temporalStepWidthModifier;
+    if (config.temporal_step_width_modifier_signalled_flag) {
+        config.temporal_step_width_modifier = m_reader.ReadValue<uint8_t>();
     }
 
-    if (upsampleType == UpsampleType::Enum::AdaptiveCubic) {
-        const auto coeff0 = m_reader.ReadValue<uint16_t>();
-        const auto coeff1 = m_reader.ReadValue<uint16_t>();
-        const auto coeff2 = m_reader.ReadValue<uint16_t>();
-        const auto coeff3 = m_reader.ReadValue<uint16_t>();
-
-        OutputVerbose("\t\t%-20s| %u %u %u %u\n", "AdaptiveCubic Kernel Coeffs", coeff0, coeff1,
-                      coeff2, coeff3);
-        std::vector<uint32_t> coeffs = {coeff0, coeff1, coeff2, coeff3};
-        m_blockJson["AdaptiveCubic Kernel Coeffs"] = nlohmann::json(coeffs);
+    if (config.upsample_type == UpsampleType::ADAPTIVE_CUBIC) {
+        config.adaptive_cubic_kernel_coeffs = {
+            m_reader.ReadValue<uint16_t>(), m_reader.ReadValue<uint16_t>(),
+            m_reader.ReadValue<uint16_t>(), m_reader.ReadValue<uint16_t>()};
     }
 
-    if (deblocking) {
+    if (config.level1_filtering_signalled_flag) {
         const auto deblockField = m_reader.ReadValue<uint8_t>();
-        const uint8_t coeff0 = (deblockField & 0xF0) >> 4;
-        const uint8_t coeff1 = deblockField & 0x0F;
-
-        OutputVerbose("\t\t%-20s| %u\n", "Deblock Coeff 0", coeff0);
-        OutputVerbose("\t\t%-20s| %u\n", "Deblock Coeff 1", coeff1);
-        m_blockJson["Deblock Coeff 0"] = coeff0;
-        m_blockJson["Deblock Coeff 1"] = coeff1;
+        config.level1_filtering = {static_cast<uint8_t>((deblockField & 0xF0) >> 4), // deblockField.11110000
+                                   static_cast<uint8_t>(deblockField & 0x0F)}; // deblockField.00001111
     }
 
-    if (tilingMode != TilingMode::Enum::None) {
-        if (tilingMode == TilingMode::Enum::Tile512x256) {
-            m_tileWidth = 512;
-            m_tileHeight = 256;
-        } else if (tilingMode == TilingMode::Enum::Tile1024x512) {
-            m_tileWidth = 1024;
-            m_tileHeight = 512;
-        }
-        if (tilingMode == TilingMode::Enum::Custom) {
-            m_tileWidth = m_reader.ReadValue<uint16_t>();
-            m_tileHeight = m_reader.ReadValue<uint16_t>();
-
-            OutputVerbose("\t\t%-20s| %u\n", "Custom Tile Width", m_tileWidth);
-            OutputVerbose("\t\t%-20s| %u\n", "Custom Tile Height", m_tileHeight);
-            m_blockJson["Custom Tile Width"] = m_tileWidth;
-            m_blockJson["Custom Tile Height"] = m_tileHeight;
+    if (config.tile_dimensions_type != TilingMode::NONE) {
+        if (config.tile_dimensions_type == TilingMode::CUSTOM) {
+            const auto tileWidth = m_reader.ReadValue<uint16_t>();
+            const auto tileHeight = m_reader.ReadValue<uint16_t>();
+            config.custom_tile = {tileWidth, tileHeight};
         }
 
         const auto tilingField = m_reader.ReadValue<uint8_t>();
-        if ((tilingField & 0xF8) != 0) {
-            VNLog::Info("\tWarning: Reserved bits (tiling) not zero: 0x%02x\n",
-                        static_cast<unsigned>(tilingField & 0xF8));
+        if ((tilingField & 0xF8) != 0) { // tilingField.11111000
+            VNLOG_WARN("Reserved bits (tiling) not zero: 0x%02x",
+                       static_cast<unsigned>(tilingField & 0xF8)); // tilingField.11111000
         }
-
-        m_compressionEntropyEnabledPerTileFlag = (tilingField & 0x04) >> 2;
-        m_compressionTypeSizePerTile = TiledSizeCompressionType::FromValue(tilingField & 0x03);
-
-        OutputVerbose("\t\t%-20s| %u\n", "Tiling Entropy Per Tile", m_compressionEntropyEnabledPerTileFlag);
-        OutputVerbose("\t\t%-20s| %s [%u]\n", "Tiling Size Per Tile",
-                      TiledSizeCompressionType::ToString(m_compressionTypeSizePerTile),
-                      static_cast<uint8_t>(m_compressionTypeSizePerTile));
-        m_blockJson["Tiling Entropy Per Tile"] = m_compressionEntropyEnabledPerTileFlag;
-        m_blockJson["Tiling Size Per Tile"] =
-            TiledSizeCompressionType::ToString(m_compressionTypeSizePerTile);
+        config.compression_type = GlobalConfigCompressionType();
+        config.compression_type->compression_type_entropy_enabled_per_tile_flag =
+            static_cast<EntropyEnabledPerTileType>((tilingField & 0x04) >> 2); // tilingField.00000100
+        config.compression_type->compression_type_size_per_tile =
+            FromValue<TiledSizeCompressionType>(tilingField & 0x03); // tilingField.00000011
     }
 
-    if (resolutionType == kResolutionTypeCustom) {
-        m_width = m_reader.ReadValue<uint16_t>();
-        m_height = m_reader.ReadValue<uint16_t>();
-    } else if (resolutionType > 0 && resolutionType < kResolutionTypeLUT.size()) {
-        const SyntaxResolution& res = kResolutionTypeLUT[resolutionType];
-        m_width = res.width;
-        m_height = res.height;
+    if (config.resolution_type == kResolutionTypeCustom) {
+        config.custom_resolution->at(0) = m_reader.ReadValue<uint16_t>();
+        config.custom_resolution->at(1) = m_reader.ReadValue<uint16_t>();
+        config.x_resolution = config.custom_resolution.value();
+    } else if (config.resolution_type > 0 && config.resolution_type < kResolutionTypeLUT.size()) {
+        const SyntaxResolution& res = kResolutionTypeLUT[config.resolution_type];
+        config.x_resolution = {res.width, res.height};
     }
 
-    OutputVerbose("\t\t%-20s| %ux%u\n", "Resolution dimensions", m_width, m_height);
-    m_blockJson["Resolution dimensions"] = std::to_string(m_width) + "x" + std::to_string(m_height);
-
-    if (chromaMultiplierFlag) {
-        chromaSWMultiplier = m_reader.ReadValue<uint8_t>();
+    if (config.chroma_step_width_flag) {
+        config.chroma_step_width_multiplier = m_reader.ReadValue<uint8_t>();
     }
 
-    OutputVerbose("\t\t%-20s| %u\n", "Chroma Step Width Multiplier", chromaSWMultiplier);
-    m_blockJson["Chroma Step Width Multiplier"] = chromaSWMultiplier;
-
-    m_temporalEnabled = (temporalEnabled != 0);
-    m_globalConfigReceived = true;
+    m_globalConfig = config;
 
     return true;
 }
 
-bool Parser::parsePictureConfig()
+bool Parser::parsePictureConfig(PictureConfig& config, const FrameTypeLCEVC nalType)
 {
+    if (!m_globalConfig.has_value()) {
+        VNLOG_ERROR("Encoded Data received before a Global Config");
+        return false;
+    }
+    const auto& globalConfig = m_globalConfig.value();
+
     const auto field0 = m_reader.ReadValue<uint8_t>();
 
-    QuantMatrixMode::Enum quantMatrixMode = QuantMatrixMode::Enum::Invalid;
-    uint8_t dequantOffsetEnabled = 0;
-    PictureType::Enum pictureType = PictureType::Enum::Invalid;
-    uint8_t temporalRefresh = 0;
-    uint8_t stepWidthSublayer1Enabled = 0;
-    uint8_t ditheringControlFlag = 0;
+    config.no_enhancement_bit_flag = (field0 & 0x80) >> 7; // field0.10000000
+    config.picture_type_bit_flag = static_cast<PictureType>((field0 & 0x04) >> 2); // field0.00000100
+    config.temporal_refresh_bit_flag = ((field0 & 0x02) >> 1) != 0; // field0.00000010
 
-    const uint8_t noEnhancementBitFlag = (field0 & 0x80) >> 7;
-
-    if (noEnhancementBitFlag == 0) {
+    if (config.no_enhancement_bit_flag == 0) {
         const auto field1 = m_reader.ReadValue<uint16_t>();
+        config.quant_matrix_mode = FromValue<QuantMatrixMode>((field0 & 0x70) >> 4); // field0.01110000
+        config.dequant_offset_signalled_flag = ((field0 & 0x08) >> 3) != 0; // field0.00001000
+        config.step_width_sublayer1_enabled_flag = (field0 & 0x01) != 0;    // field0.00000001
+        config.step_width_sublayer2 = (field1 & 0xFFFE) >> 1; // field1.1111111111111110
+        config.dithering_control_flag = (field1 & 0x01) != 0; // field1.0000000000000001
 
-        quantMatrixMode = QuantMatrixMode::FromValue((field0 & 0x70) >> 4);
-        dequantOffsetEnabled = (field0 & 0x08) >> 3;
-        pictureType = PictureType::FromValue((field0 & 0x04) >> 2);
-        temporalRefresh = (field0 & 0x02) >> 1;
-        stepWidthSublayer1Enabled = field0 & 0x01;
-        const uint16_t stepWidthSublayer2 = (field1 & 0xFFFE) >> 1;
-        ditheringControlFlag = static_cast<uint8_t>(field1 & 0x01);
+        config.temporal_signalling_present_flag =
+            globalConfig.temporal_enabled_flag && !config.temporal_refresh_bit_flag;
+        m_ditheringControlFlagLast = config.dithering_control_flag;
 
-        OutputVerbose("\t\tLCEVC Enabled\n");
-        OutputVerbose("\t\t%-20s| %s\n", "Quant matrix mode", QuantMatrixMode::ToString(quantMatrixMode));
-        OutputVerbose("\t\t%-20s| %u\n", "Dequant offset enabled", dequantOffsetEnabled);
-        OutputVerbose("\t\t%-20s| %s\n", "Picture type", PictureType::ToString(pictureType));
-        OutputVerbose("\t\t%-20s| %u\n", "Temporal refresh", temporalRefresh);
-        OutputVerbose("\t\t%-20s| %u\n", "Step width L-1 enabled", stepWidthSublayer1Enabled);
-        OutputVerbose("\t\t%-20s| %u\n", "Step width L-2", stepWidthSublayer2);
-        OutputVerbose("\t\t%-20s| %u\n", "Dithering Control Flag", ditheringControlFlag);
-
-        m_blockJson["LCEVC Enabled"] = "true";
-        m_blockJson["Quant Matrix Mode"] = QuantMatrixMode::ToString(quantMatrixMode);
-        m_blockJson["Dequant Offset Enabled"] = dequantOffsetEnabled;
-        m_blockJson["Picture Type"] = PictureType::ToString(pictureType);
-        m_blockJson["Temporal Refresh"] = temporalRefresh;
-        m_blockJson["Step Width L-1 Enabled"] = stepWidthSublayer1Enabled;
-        m_blockJson["Step Width L-2"] = stepWidthSublayer2;
-        m_blockJson["Dithering Control Flag"] = ditheringControlFlag;
-
-        m_temporalSignaled = m_temporalEnabled && !temporalRefresh;
-        m_bEnhancementEnabled = true;
-        m_ditheringControlFlag = ditheringControlFlag;
     } else {
-        pictureType = PictureType::FromValue((field0 & 0x04) >> 2);
-        temporalRefresh = (field0 & 0x02) >> 1;
-        const uint8_t temporalSignaled = (field0 & 0x01);
+        config.temporal_signalling_present_flag = (field0 & 0x01) != 0; // field0.00000001
 
         // Inferred values
-        stepWidthSublayer1Enabled = 0;
-        quantMatrixMode = QuantMatrixMode::Enum::UsePrevious;
-        dequantOffsetEnabled = 0;
+        config.quant_matrix_mode = QuantMatrixMode::USE_PREVIOUS;
+        config.dequant_offset_signalled_flag = false;
+        config.step_width_sublayer1_enabled_flag = false;
 
-        if (m_nalType == lcevc::NalUnitType::Enum::IDR) {
-            // When dithering_control_flag is not present,
-            // it is inferred to be equal to 0 for IDR picture
-            ditheringControlFlag = 0;
-        } else {
-            // For pictures other than the IDR picture,
-            // it is inferred to be equal to the value of
-            // dithering_control_flag for the preceding picture
-            ditheringControlFlag = m_ditheringControlFlag;
-        }
-
-        OutputVerbose("\t\tLCEVC Disabled\n");
-        OutputVerbose("\t\t%-20s| %s\n", "Quant matrix mode", QuantMatrixMode::ToString(quantMatrixMode));
-        OutputVerbose("\t\t%-20s| %u\n", "Dequant offset enabled", dequantOffsetEnabled);
-        OutputVerbose("\t\t%-20s| %s\n", "Picture type", PictureType::ToString(pictureType));
-        OutputVerbose("\t\t%-20s| %u\n", "Temporal refresh", temporalRefresh);
-        OutputVerbose("\t\t%-20s| %u\n", "Temporal signalling present", temporalSignaled);
-        OutputVerbose("\t\t%-20s| %u\n", "Step width L-1 enabled", stepWidthSublayer1Enabled);
-        OutputVerbose("\t\t%-20s| %u\n", "Dithering Control Flag", ditheringControlFlag);
-
-        m_blockJson["LCEVC Enabled"] = "false";
-        m_blockJson["Quant Matrix Mode"] = QuantMatrixMode::ToString(quantMatrixMode);
-        m_blockJson["Dequant Offset Enabled"] = dequantOffsetEnabled;
-        m_blockJson["Picture Type"] = PictureType::ToString(pictureType);
-        m_blockJson["Temporal Refresh"] = temporalRefresh;
-        m_blockJson["Temporal Signalled"] = temporalSignaled;
-        m_blockJson["Step Width L-1 Enabled"] = stepWidthSublayer1Enabled;
-        m_blockJson["Dithering Control Flag"] = ditheringControlFlag;
-
-        m_temporalSignaled = (temporalSignaled != 0);
-        m_bEnhancementEnabled = false;
-        m_ditheringControlFlag = ditheringControlFlag;
+        // When dithering_control_flag is not present, it is inferred to be equal to 0 for IDR picture
+        // For pictures other than the IDR picture, it is inferred to be equal to the value of dithering_control_flag for the preceding picture
+        config.dithering_control_flag =
+            (nalType == FrameTypeLCEVC::IDR) ? false : m_ditheringControlFlagLast;
+        m_ditheringControlFlagLast = config.dithering_control_flag;
     }
 
-    if (pictureType == PictureType::Enum::Field) {
+    if (config.picture_type_bit_flag == PictureType::FIELD) {
         const auto fieldField = m_reader.ReadValue<uint8_t>();
-        const FieldType::Enum fieldType = FieldType::FromValue((fieldField & 0x80) >> 7);
-        if ((fieldField & 0x7F) != 0) {
-            VNLog::Info("\tWarning: Reserved bits (field_type) not zero: 0x%02x\n",
-                        static_cast<unsigned>(fieldField & 0x7F));
+        config.field_type_bit_flag =
+            std::make_optional<FieldType>(static_cast<FieldType>((fieldField & 0x80) >> 7)); // fieldField.10000000
+
+        if ((fieldField & 0x7F) != 0) { // fieldField.01111111
+            VNLOG_WARN("Reserved bits (field_type) not zero: 0x%02x",
+                       static_cast<unsigned>(fieldField & 0x7F)); // fieldField.01111111
         }
-        OutputVerbose("\t\t%-20s| %s\n", "Field type", FieldType::ToString(fieldType));
-        m_blockJson["Field Type"] = FieldType::ToString(fieldType);
     }
 
-    if (stepWidthSublayer1Enabled) {
+    if (config.step_width_sublayer1_enabled_flag) {
         const auto sublayer1Field = m_reader.ReadValue<uint16_t>();
-        const uint16_t stepWidthSublayer1 = (sublayer1Field & 0xFFFE) >> 1;
-        const uint16_t filteringLevel1Enabled = (sublayer1Field & 0x0001);
-        OutputVerbose("\t\t%-20s| %u\n", "Step width L-1", stepWidthSublayer1);
-        OutputVerbose("\t\t%-20s| %u\n", "Filtering Level-1 enabled", filteringLevel1Enabled);
-
-        m_blockJson["Step Width L-1"] = stepWidthSublayer1;
-        m_blockJson["Filtering Level1 Enabled"] = filteringLevel1Enabled;
+        const uint16_t stepWidthSublayer1 = (sublayer1Field & 0xFFFE) >> 1; // sublayer1Field.1111111111111110
+        const bool filteringLevel1Enabled = (sublayer1Field & 0x0001) != 0; // sublayer1Field.0000000000000001
+        config.step_width_sublayer1 =
+            std::make_optional<PictureConfigSublayer1>({stepWidthSublayer1, filteringLevel1Enabled});
     }
 
-    if (quantMatrixMode != QuantMatrixMode::Enum::UsePrevious &&
-        quantMatrixMode != QuantMatrixMode::Enum::UseDefault) {
-        const uint32_t coeffGroupCount = TransformType::getCoeffGroupCount(m_transformType);
-        const uint8_t matrixCount = ((quantMatrixMode == QuantMatrixMode::Enum::CustomBoth) ||
-                                     (quantMatrixMode == QuantMatrixMode::Enum::CustomSublayer2) ||
-                                     (quantMatrixMode == QuantMatrixMode::Enum::CustomSublayer1))
-                                        ? 1
-                                        : 2;
-
-        ordered_json quantMatrixJson;
-        for (uint32_t matrixIdx = 0; matrixIdx < matrixCount; ++matrixIdx) {
-            std::stringstream quantMatrixFormat;
-            quantMatrixFormat << "{ ";
-            std::vector<uint32_t> quantValues;
-
-            for (uint32_t coeffGroupIdx = 0; coeffGroupIdx < coeffGroupCount; ++coeffGroupIdx) {
-                const auto val = static_cast<uint32_t>(m_reader.ReadValue<uint8_t>());
-                quantMatrixFormat << val;
-                quantValues.push_back(val);
-
-                if (coeffGroupIdx != (coeffGroupCount - 1)) {
-                    quantMatrixFormat << ", ";
-                }
-            }
-
-            quantMatrixFormat << " }";
-
-            std::string key = "Matrix " + std::to_string(matrixIdx);
-            quantMatrixJson[key] = quantValues;
-
-            const auto quantMatrixStr = quantMatrixFormat.str();
-            OutputVerbose("\t\t%-20s| Matrix %u = %s\n", "Custom quant matrix", matrixIdx,
-                          quantMatrixStr.c_str());
+    if (config.quant_matrix_mode == QuantMatrixMode::CUSTOM_BOTH ||
+        config.quant_matrix_mode == QuantMatrixMode::CUSTOM_SUBLAYER_2 ||
+        config.quant_matrix_mode == QuantMatrixMode::CUSTOM_BOTH_UNIQUE) {
+        const uint32_t layerCount = getCoeffGroupCount(globalConfig.transform_type);
+        config.qm_coefficient_0 = std::make_optional<std::vector<uint8_t>>();
+        for (uint32_t layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
+            const auto val = m_reader.ReadValue<uint8_t>();
+            config.qm_coefficient_0->push_back(val);
         }
-        m_blockJson["Custom Quant Matrices"] = quantMatrixJson;
     }
 
-    if (dequantOffsetEnabled) {
+    if (config.quant_matrix_mode == QuantMatrixMode::CUSTOM_SUBLAYER_1 ||
+        config.quant_matrix_mode == QuantMatrixMode::CUSTOM_BOTH_UNIQUE) {
+        const uint32_t layerCount = getCoeffGroupCount(globalConfig.transform_type);
+        config.qm_coefficient_1 = std::make_optional<std::vector<uint8_t>>();
+        for (uint32_t layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
+            const auto val = m_reader.ReadValue<uint8_t>();
+            config.qm_coefficient_1->push_back(val);
+        }
+    }
+
+    if (config.dequant_offset_signalled_flag) {
         const auto dequantOffsetField = m_reader.ReadValue<uint8_t>();
 
-        const uint8_t dequantOffsetMode = (dequantOffsetField & 0x80) >> 7;
-        const uint8_t dequantOffset = (dequantOffsetField & 0x7F);
+        const bool dequantOffsetMode = ((dequantOffsetField & 0x80) >> 7) != 0; // dequantOffsetField.10000000
+        const uint8_t dequantOffset = (dequantOffsetField & 0x7F); // dequantOffsetField.01111111
 
-        OutputVerbose("\t\t%-20s| %u\n", "Dequant offset mode", dequantOffsetMode);
-        OutputVerbose("\t\t%-20s| %u\n", "Dequant offset", dequantOffset);
-        m_blockJson["Dequant Offset Mode"] = dequantOffsetMode;
-        m_blockJson["Dequant Offset"] = dequantOffset;
+        config.dequant_offset =
+            std::make_optional<PictureConfigDequantOffset>({dequantOffsetMode, dequantOffset});
     }
 
-    if (ditheringControlFlag) {
+    if (config.dithering_control_flag) {
         const auto ditheringField = m_reader.ReadValue<uint8_t>();
-        const DitherType::Enum ditheringType = DitherType::FromValue((ditheringField & 0xC0) >> 6);
-        OutputVerbose("\t\t%-20s| %s\n", "Dithering type", DitherType::ToString(ditheringType));
-        m_blockJson["Dithering Type"] = DitherType::ToString(ditheringType);
 
-        if (ditheringType != DitherType::Enum::None) {
-            const uint8_t ditheringStrength = ditheringField & 0x1F;
-            OutputVerbose("\t\t%-20s| %u\n", "Dithering strength", ditheringStrength);
-            m_blockJson["Dithering Strength"] = ditheringStrength;
-        } else if ((ditheringField & 0x1F) != 0) {
-            VNLog::Info("\tWarning: Reserved bits (dithering) not zero: 0x%02x\n",
-                        static_cast<unsigned>(ditheringField & 0x1F));
+        config.dithering = std::make_optional<PictureConfigDithering>();
+        config.dithering->dithering_type =
+            FromValue<DitherType>((ditheringField & 0xC0) >> 6); // ditheringField.11000000;
+
+        if (config.dithering->dithering_type != DitherType::NONE) {
+            const uint8_t ditheringStrength = ditheringField & 0x1F; // ditheringField.00011111
+            config.dithering->dithering_strength = std::make_optional<uint8_t>(ditheringStrength);
+
+        } else if ((ditheringField & 0x1F) != 0) { // ditheringField.00011111
+            VNLOG_WARN("Reserved bits (dithering) not zero: 0x%02x",
+                       static_cast<unsigned>(ditheringField & 0x1F)); // ditheringField.00011111
         }
     }
 
+    m_pictureConfig = std::make_optional<PictureConfig>(config);
     return true;
 }
 
-bool Parser::parseEncodedData()
+bool Parser::parseEncodedData(EncodedData& config)
 {
-    if (!m_globalConfigReceived) {
-        VNLog::Error("\tERROR: Encoded Data received before a Global Config\n");
+    constexpr uint8_t surfacePropCount = 2;
+    constexpr uint8_t maxSurfacePropByteCount = (((((2 * 3 * 16) + 3) * surfacePropCount) + 7) & ~7) >> 3;
+
+    if (!m_globalConfig.has_value()) {
+        VNLOG_ERROR("Encoded Data received before a Global Config");
+        return false;
+    }
+    if (!m_pictureConfig.has_value()) {
+        VNLOG_ERROR("Encoded Data received before a Picture Config");
         return false;
     }
 
+    const auto& globalConfig = m_globalConfig.value();
+    const auto& pictureConfig = m_pictureConfig.value();
+
     // RLE/Prefix Coding choice.
-    uint32_t planeCount = PlaneMode::getPlaneCount(m_planeMode);
-    uint32_t coeffGroupCount = TransformType::getCoeffGroupCount(m_transformType);
-    uint32_t chunkCount = (!m_bEnhancementEnabled ? 0 : (2 * planeCount * coeffGroupCount)) +
-                          (m_temporalSignaled ? planeCount : 0);
-    static const uint8_t surfacePropCount = 2;
-    uint8_t surfacePropByteCount = (((chunkCount * surfacePropCount) + 7) & ~7) >> 3;
-    static const uint8_t maxSurfacePropByteCount =
-        (((((2 * 3 * 16) + 3) * surfacePropCount) + 7) & ~7) >> 3;
-    uint8_t surfaceProps[maxSurfacePropByteCount] = {0};
+    config.x_plane_count = getPlaneCount(globalConfig.planes_type);
+    config.x_coefficient_group_count = getCoeffGroupCount(globalConfig.transform_type);
+    int64_t chunkCount = (pictureConfig.no_enhancement_bit_flag
+                              ? 0
+                              : (2 * config.x_plane_count * config.x_coefficient_group_count)) +
+                         (pictureConfig.temporal_signalling_present_flag ? config.x_plane_count : 0);
+    config.x_surface_header_bytes = (((chunkCount * surfacePropCount) + 7) & ~7) >> 3;
 
-    m_reader.ReadBytes(surfaceProps, surfacePropByteCount);
+    std::array<uint8_t, maxSurfacePropByteCount> surfaceProps = {0};
+    m_reader.ReadBytes(surfaceProps.data(), static_cast<uint64_t>(config.x_surface_header_bytes));
+    BitfieldDecoderStream<uint8_t> surfacePropsDecoder(
+        surfaceProps.data(), static_cast<uint32_t>(config.x_surface_header_bytes));
 
-    BitfieldDecoderStream<uint8_t> surfacePropsDecoder(surfaceProps, surfacePropByteCount);
+    for (int64_t planeIndex = 0; planeIndex < config.x_plane_count; ++planeIndex) {
+        if (pictureConfig.no_enhancement_bit_flag == 0) {
+            for (const auto& sublayer : EncodedDataSubLayerList) {
+                for (int64_t coeffGroup = 0; coeffGroup < config.x_coefficient_group_count; ++coeffGroup) {
+                    EncodedDataLayer layer;
+                    layer.plane = planeIndex;
+                    layer.sublayer = sublayer;
+                    layer.coefficient_group = coeffGroup;
 
-    OutputVerbose("\t\t[Plane, Sub-layer, Coefficient Group]\n");
+                    layer.entropy_enabled_flag = surfacePropsDecoder.ReadBit();
+                    layer.rle_only_flag = surfacePropsDecoder.ReadBit();
 
-    ordered_json layeredData = ordered_json::array();
-
-    for (uint32_t planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
-        if (m_bEnhancementEnabled) {
-            for (uint32_t sublayer = 1; sublayer <= 2; ++sublayer) {
-                for (uint32_t coeffGroup = 0; coeffGroup < coeffGroupCount; ++coeffGroup) {
-                    bool bEntropyEnabled = surfacePropsDecoder.readBit();
-                    bool bRLEOnly = surfacePropsDecoder.readBit();
-
-                    if (bEntropyEnabled) {
+                    if (layer.entropy_enabled_flag) {
                         uint32_t chunkDataSize = 0;
                         try {
                             chunkDataSize = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-                        } catch (const std::exception&) {
-                            VNLog::Error(
-                                "\tERROR: Invalid chunk size (overflow) in encoded data\n");
+                        } catch (const std::overflow_error&) {
+                            VNLOG_ERROR("Invalid chunk size (overflow) in encoded data");
                             return false;
                         }
-                        OutputVerbose("\t\t[%2u, %2u, %2u]   %-10s| %u\n", planeIndex, sublayer,
-                                      coeffGroup, bRLEOnly ? "RLE" : "Prefix Coding", chunkDataSize);
+                        m_sublayerSizes[sublayer] += chunkDataSize;
 
-                        layeredData.push_back({{"Plane", planeIndex},
-                                               {"Sub-layer", sublayer},
-                                               {"Coefficient Group", coeffGroup},
-                                               {"Mode", bRLEOnly ? "RLE" : "Prefix Coding"},
-                                               {"Size", chunkDataSize}});
                         m_reader.SeekForward(chunkDataSize);
-
-                        if (sublayer == 1) {
-                            sublayer1Size += chunkDataSize;
-                        } else if (sublayer == 2) {
-                            sublayer2Size += chunkDataSize;
-                        }
-                    } else {
-                        OutputVerbose("\t\t[%2u, %2u, %2u]   %-10s\n", planeIndex, sublayer,
-                                      coeffGroup, "Disabled");
-                        layeredData.push_back({{"Plane", planeIndex},
-                                               {"Sub-layer", sublayer},
-                                               {"Coefficient Group", coeffGroup},
-                                               {"Mode", "Disabled"}});
+                        layer.size = chunkDataSize;
+                        config.layers.push_back(layer);
                     }
                 }
             }
-        } else {
-            OutputVerbose("\t\t\tNo residual coefficient groups signaled\n");
-            layeredData.push_back({{"Plane", planeIndex}, {"residual coefficient groups signaled", "No"}});
         }
 
-        if (m_temporalSignaled) {
-            bool bEntropyEnabled = surfacePropsDecoder.readBit();
-            bool bRLEOnly = surfacePropsDecoder.readBit();
+        if (pictureConfig.temporal_signalling_present_flag) {
+            EncodedDataLayer layer;
+            layer.plane = planeIndex;
+            layer.sublayer = EncodedDataSubLayer::TEMPORAL;
 
-            if (bEntropyEnabled) {
+            layer.entropy_enabled_flag = surfacePropsDecoder.ReadBit();
+            layer.rle_only_flag = surfacePropsDecoder.ReadBit();
+
+            if (layer.entropy_enabled_flag) {
                 uint32_t chunkDataSize = 0;
                 try {
                     chunkDataSize = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
-                } catch (const std::exception&) {
-                    VNLog::Error("\tERROR: Invalid chunk size (overflow) in temporal layer\n");
+                } catch (const std::overflow_error&) {
+                    VNLOG_ERROR("Invalid chunk size (overflow) in temporal layer");
                     return false;
                 }
-                OutputVerbose("\t\t[%2u, temporal] %-10s| %u\n", planeIndex,
-                              bRLEOnly ? "RLE" : "Prefix Coding", chunkDataSize);
-                layeredData.push_back({{"Plane", planeIndex},
-                                       {"Sub-layer", "temporal"},
-                                       {"Mode", bRLEOnly ? "RLE" : "Prefix Coding"},
-                                       {"Size", chunkDataSize}});
+                layer.size = chunkDataSize;
+                config.layers.push_back(layer);
 
                 m_reader.SeekForward(chunkDataSize);
-                temporalSize += chunkDataSize;
-            } else {
-                OutputVerbose("\t\t[%2u, temporal] %-10s\n", planeIndex, "Disabled");
-                layeredData.push_back(
-                    {{"Plane", planeIndex}, {"Sub-layer", "temporal"}, {"Mode", "Disabled"}});
+                m_sublayerSizes[EncodedDataSubLayer::TEMPORAL] += chunkDataSize;
             }
-        } else {
-            OutputVerbose("\t\t[%2u] No temporal signaled\n", planeIndex);
-            layeredData.push_back({{"Plane", planeIndex}, {"temporal signaled", "No"}});
         }
     }
-    m_blockJson["Layered Data"] = layeredData;
     return true;
 }
 
-bool Parser::parseEncodedTileData(uint32_t blockSize)
+bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
 {
-    if (!m_globalConfigReceived) {
-        VNLog::Error("\tERROR: Encoded Tiled Data received before a Global Config\n");
+    if (!m_globalConfig.has_value()) {
+        VNLOG_ERROR("Encoded Tiled Data received before a Global Config");
+        return false;
+    }
+    if (!m_pictureConfig.has_value()) {
+        VNLOG_ERROR("Encoded Tiled Data received before a Picture Config");
         return false;
     }
 
-    if (m_tileWidth == 0 || m_tileHeight == 0) {
-        VNLog::Error("\tERROR: tile dimensions are invalid, a dimension of 0 "
-                     "received from global "
-                     "config block, skipping block cannot determine number of "
-                     "tiles. tile_width: %u "
-                     "tile_height: %u\n",
-                     m_tileWidth, m_tileHeight);
+    const auto& globalConfig = m_globalConfig.value();
+    const auto& pictureConfig = m_pictureConfig.value();
+
+    const auto compressionType = globalConfig.compression_type.value_or(GlobalConfigCompressionType());
+
+    const auto tileDimensions = getValidatedTileDimensions(globalConfig);
+    if (!tileDimensions.has_value()) {
         parseSkipBlock(blockSize);
         return false;
     }
 
-    // NOLINTNEXTLINE(clang-analyzer-core.DivideZero)
-    if (m_tileHeight % TransformType::getTUSize(m_transformType) != 0 ||
-        m_tileWidth % TransformType::getTUSize(m_transformType) != 0) {
-        VNLog::Error("\tERROR: tile dimensions are invalid, tile dimension must be "
-                     "divisible by TU "
-                     "size. Skipping block. tile_width: %u "
-                     "tile_height: %u, TU size: %u\n",
-                     m_tileWidth, m_tileHeight, TransformType::getTUSize(m_transformType));
-        parseSkipBlock(blockSize);
-        return false;
-    }
+    const uint16_t tileWidth = tileDimensions->at(0);
+    const uint16_t tileHeight = tileDimensions->at(1);
+    config.x_tile_dimensions = {tileWidth, tileHeight};
 
-    const auto nTilesL2 =
-        static_cast<int32_t>(calculateNumTilesLevel2(m_width, m_height, m_tileWidth, m_tileHeight));
-    const auto nTilesL1 = static_cast<int32_t>(calculateNumTilesLevel1(
-        m_width, m_height, m_tileWidth, m_tileHeight, ScalingMode::FromValue(m_scalingModeLevel2)));
-    const auto planeCount = static_cast<int32_t>(PlaneMode::getPlaneCount(m_planeMode));
-    const auto coeffGroupCount = static_cast<int32_t>(TransformType::getCoeffGroupCount(m_transformType));
+    config.x_level2_tile_count = static_cast<int32_t>(calculateNumTilesLevel2(
+        globalConfig.x_resolution[0], globalConfig.x_resolution[1], tileWidth, tileHeight));
+    config.x_level1_tile_count = static_cast<int32_t>(
+        calculateNumTilesLevel1(globalConfig.x_resolution[0], globalConfig.x_resolution[1],
+                                tileWidth, tileHeight, globalConfig.scaling_mode_level2));
+
+    config.x_plane_count = static_cast<int32_t>(getPlaneCount(globalConfig.planes_type));
+    config.x_coefficient_group_count =
+        static_cast<int32_t>(getCoeffGroupCount(globalConfig.transform_type));
 
     // Parse per-layer RLE only flag
     const size_t layerRLEOnlyFlagCount =
-        (!m_bEnhancementEnabled ? 0 : static_cast<size_t>(kNumLevels * coeffGroupCount * planeCount)) +
-        (static_cast<size_t>(m_temporalSignaled) * static_cast<size_t>(planeCount));
+        (pictureConfig.no_enhancement_bit_flag
+             ? 0
+             : static_cast<size_t>(kNumLevels * config.x_coefficient_group_count * config.x_plane_count)) +
+        (static_cast<size_t>(pictureConfig.temporal_signalling_present_flag) *
+         static_cast<size_t>(config.x_plane_count));
     const size_t numBytesRLEOnlyFlags = ((layerRLEOnlyFlagCount + 7U) & ~static_cast<size_t>(7)) >> 3;
 
     if (numBytesRLEOnlyFlags > (std::numeric_limits<uint32_t>::max)()) {
@@ -1463,15 +896,17 @@ bool Parser::parseEncodedTileData(uint32_t blockSize)
 
     // Parse per-tile entropy enabled flag
     const size_t chunkCount =
-        (!m_bEnhancementEnabled ? 0U
-                                : (static_cast<size_t>(planeCount * coeffGroupCount) *
-                                   static_cast<size_t>(nTilesL1 + nTilesL2))) +
-        (static_cast<size_t>(m_temporalSignaled) * static_cast<size_t>(planeCount) *
-         static_cast<size_t>(nTilesL2));
+        (pictureConfig.no_enhancement_bit_flag
+             ? 0U
+             : (static_cast<size_t>(config.x_plane_count * config.x_coefficient_group_count) *
+                static_cast<size_t>(config.x_level1_tile_count + config.x_level2_tile_count))) +
+        (static_cast<size_t>(pictureConfig.temporal_signalling_present_flag) *
+         static_cast<size_t>(config.x_plane_count) * static_cast<size_t>(config.x_level2_tile_count));
 
     std::vector<uint8_t> entropyEnabledFlags(chunkCount, 0);
 
-    if (m_compressionEntropyEnabledPerTileFlag) {
+    if (compressionType.compression_type_entropy_enabled_per_tile_flag ==
+        EntropyEnabledPerTileType::RUN_LENGTH_ENCODING) {
         if (!parseCompressedEntropyEnabledFlags(entropyEnabledFlags)) {
             return false;
         }
@@ -1488,29 +923,27 @@ bool Parser::parseEncodedTileData(uint32_t blockSize)
                                                                  entropyFlagBytes);
 
         for (auto& enabledFlag : entropyEnabledFlags) {
-            enabledFlag = entropyEnabledFlagDecoder.readBit();
+            enabledFlag = entropyEnabledFlagDecoder.ReadBit();
         }
     }
 
-    OutputVerbose("\t\t[Plane, Sub-layer, Coefficient Group, Tile]\n");
-
     int32_t chunkIndex = 0;
 
-    ordered_json layeredTileData = ordered_json::array();
-
     // Parsing of chunk size
-    for (int32_t plane = 0; plane < planeCount; plane++) {
-        if (m_bEnhancementEnabled) {
-            for (uint32_t sublayer = 1; sublayer <= 2; ++sublayer) {
-                const int32_t tileCount = (sublayer == 1 ? nTilesL2 : nTilesL1);
+    for (int64_t plane = 0; plane < config.x_plane_count; plane++) {
+        if (pictureConfig.no_enhancement_bit_flag == false) {
+            for (const auto& sublayer : EncodedDataSubLayerList) {
+                const int64_t tileCount =
+                    (sublayer == EncodedDataSubLayer::SUBLAYER_1 ? config.x_level2_tile_count
+                                                                 : config.x_level1_tile_count);
 
-                for (int32_t coeffGroup = 0; coeffGroup < coeffGroupCount; coeffGroup++) {
-                    bool bRLEOnlyFlag = rleFlagDecoder.readBit();
+                for (int32_t coeffGroup = 0; coeffGroup < config.x_coefficient_group_count; coeffGroup++) {
+                    const auto rleOnlyFlag = rleFlagDecoder.ReadBit();
 
                     std::vector<uint32_t> decompressedChunkSizes;
                     uint32_t decompressedChunkSizesIndex = 0;
 
-                    if (m_compressionTypeSizePerTile != TiledSizeCompressionType::Enum::None) {
+                    if (compressionType.compression_type_size_per_tile != TiledSizeCompressionType::NONE) {
                         // Determine number of enabled flags.
                         uint32_t signalledSizes = 0;
                         for (int32_t i = chunkIndex; i < chunkIndex + tileCount; ++i) {
@@ -1518,389 +951,266 @@ bool Parser::parseEncodedTileData(uint32_t blockSize)
                         }
 
                         // Decompress sizes into buffer.
-                        entropyDecodeSizes(m_reader, signalledSizes, m_compressionTypeSizePerTile,
+                        entropyDecodeSizes(m_reader, signalledSizes,
+                                           compressionType.compression_type_size_per_tile,
                                            decompressedChunkSizes);
                     }
 
-                    for (int32_t tile = 0; tile < tileCount; tile++) {
-                        const bool bEntropyEnabledFlag = entropyEnabledFlags[chunkIndex++];
+                    for (int64_t tile = 0; tile < tileCount; tile++) {
+                        EncodedTileDataLayer layer;
+                        layer.plane = plane;
+                        layer.sublayer = sublayer;
+                        layer.coefficient_group = static_cast<uint32_t>(coeffGroup);
+                        layer.tile = tile;
 
-                        if (bEntropyEnabledFlag) {
+                        layer.entropy_enabled_flag = entropyEnabledFlags[chunkIndex];
+                        chunkIndex += 1;
+
+                        layer.rle_only_flag = rleOnlyFlag;
+
+                        if (layer.entropy_enabled_flag) {
                             uint32_t chunkDataSize = 0;
 
-                            if (m_compressionTypeSizePerTile == TiledSizeCompressionType::Enum::None) {
+                            if (compressionType.compression_type_size_per_tile ==
+                                TiledSizeCompressionType::NONE) {
                                 try {
                                     chunkDataSize = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
                                 } catch (const std::exception&) {
-                                    VNLog::Error(
-                                        "\tERROR: Invalid chunk size (overflow) in tiled layer\n");
+                                    VNLOG_ERROR("Invalid chunk size (overflow) in tiled layer");
                                     return false;
                                 }
                             } else {
                                 // Read from decompressed representation.
                                 if (decompressedChunkSizesIndex >=
                                     static_cast<uint32_t>(decompressedChunkSizes.size())) {
-                                    VNLog::Error("\tERROR: Invalid decompressed chunk size "
-                                                 "index in residual layer");
+                                    VNLOG_ERROR("Invalid decompressed chunk size "
+                                                "index in residual layer");
                                     return false;
                                 }
 
                                 chunkDataSize = decompressedChunkSizes[decompressedChunkSizesIndex++];
                             }
 
-                            OutputVerbose("\t\t[%2u, %2u, %2u, %2u] %-10s| %u\n", plane, sublayer,
-                                          coeffGroup, tile, bRLEOnlyFlag ? "RLE" : "Prefix Coding",
-                                          chunkDataSize);
+                            m_sublayerSizes[sublayer] += chunkDataSize;
 
-                            layeredTileData.push_back({{"Plane", plane},
-                                                       {"Sub-layer", sublayer},
-                                                       {"Coefficient Group", coeffGroup},
-                                                       {"Tile", tile},
-                                                       {"Mode", bRLEOnlyFlag ? "RLE" : "Prefix Coding"},
-                                                       {"Size", chunkDataSize}});
+                            layer.size = chunkDataSize;
+                            config.layers.push_back(layer);
 
                             m_reader.SeekForward(chunkDataSize);
-
-                            if (sublayer == 1) {
-                                sublayer1Size += chunkDataSize;
-                            } else if (sublayer == 2) {
-                                sublayer2Size += chunkDataSize;
-                            }
-                        } else {
-                            OutputVerbose("\t\t[%2u, %2u, %2u, %2u] %-10s\n", plane, sublayer,
-                                          coeffGroup, tile, "Disabled");
-                            layeredTileData.push_back({{"Plane", plane},
-                                                       {"Sub-layer", sublayer},
-                                                       {"Coefficient Group", coeffGroup},
-                                                       {"Tile", tile},
-                                                       {"Mode", "Disabled"}});
                         }
                     }
                 }
             }
-        } else {
-            OutputVerbose("\t\t\tNo residual coefficient groups signaled\n");
-            layeredTileData.push_back({{"Plane", plane}, {"residual coefficient groups signaled", "No"}});
         }
 
-        if (m_temporalSignaled) {
-            bool bRLEOnlyFlag = rleFlagDecoder.readBit();
+        if (pictureConfig.temporal_signalling_present_flag) {
+            const auto rleOnlyFlag = rleFlagDecoder.ReadBit();
 
             std::vector<uint32_t> decompressedChunkSizes;
             uint32_t decompressedChunkSizesIndex = 0;
 
-            if (m_compressionTypeSizePerTile != TiledSizeCompressionType::Enum::None) {
+            if (compressionType.compression_type_size_per_tile != TiledSizeCompressionType::NONE) {
                 // Determine number of enabled flags.
                 uint32_t signalledSizes = 0;
-                for (int32_t i = chunkIndex; i < chunkIndex + nTilesL2; ++i) {
+                for (int32_t i = chunkIndex; i < chunkIndex + config.x_level2_tile_count; ++i) {
                     signalledSizes += entropyEnabledFlags[i] ? 1 : 0;
                 }
 
                 // Decompress sizes into buffer.
-                entropyDecodeSizes(m_reader, signalledSizes, m_compressionTypeSizePerTile,
+                entropyDecodeSizes(m_reader, signalledSizes, compressionType.compression_type_size_per_tile,
                                    decompressedChunkSizes);
             }
 
-            for (int32_t tile = 0; tile < nTilesL2; tile++) {
-                const bool bEntropyEnabledFlag = entropyEnabledFlags[chunkIndex++];
+            for (int32_t tile = 0; tile < config.x_level2_tile_count; tile++) {
+                EncodedTileDataLayer layer;
+                layer.plane = static_cast<uint32_t>(plane);
+                layer.tile = static_cast<uint32_t>(tile);
+                layer.sublayer = EncodedDataSubLayer::TEMPORAL;
 
-                if (bEntropyEnabledFlag) {
+                layer.entropy_enabled_flag = entropyEnabledFlags[chunkIndex];
+                chunkIndex += 1;
+
+                layer.rle_only_flag = rleOnlyFlag;
+
+                if (layer.entropy_enabled_flag) {
                     uint32_t chunkDataSize = 0;
 
-                    if (m_compressionTypeSizePerTile == TiledSizeCompressionType::Enum::None) {
+                    if (compressionType.compression_type_size_per_tile == TiledSizeCompressionType::NONE) {
                         try {
                             chunkDataSize = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
                         } catch (const std::exception&) {
-                            VNLog::Error(
-                                "\tERROR: Invalid chunk size (overflow) in tiled temporal layer\n");
+                            VNLOG_ERROR("Invalid chunk size (overflow) in tiled temporal layer");
                             return false;
                         }
                     } else {
                         // Read from decompressed representation.
                         if (decompressedChunkSizesIndex >=
                             static_cast<uint32_t>(decompressedChunkSizes.size())) {
-                            VNLog::Error(
-                                "\tERROR: Invalid decompressed chunk size index in temporal "
-                                "layer");
+                            VNLOG_ERROR("Invalid decompressed chunk size index in temporal "
+                                        "layer");
                             return false;
                         }
 
                         chunkDataSize = decompressedChunkSizes[decompressedChunkSizesIndex++];
                     }
 
-                    OutputVerbose("\t\t[%2u, %2u, temporal] %-10s| %u\n", plane, tile,
-                                  bRLEOnlyFlag ? "RLE" : "Prefix Coding", chunkDataSize);
-                    layeredTileData.push_back({{"Plane", plane},
-                                               {"Tile", tile},
-                                               {"Sub-layer", "temporal"},
-                                               {"Mode", bRLEOnlyFlag ? "RLE" : "Prefix Coding"},
-                                               {"Size", chunkDataSize}});
+                    layer.size = chunkDataSize;
+                    config.layers.push_back(layer);
                     m_reader.SeekForward(chunkDataSize);
-                    temporalSize += chunkDataSize;
-                } else {
-                    OutputVerbose("\t\t[%2u, %2u, temporal] %-10s\n", plane, tile, "Disabled");
-                    layeredTileData.push_back(
-                        {{"Plane", plane}, {"Tile", tile}, {"Sub-layer", "temporal"}, {"Mode", "Disabled"}});
+                    m_sublayerSizes[EncodedDataSubLayer::TEMPORAL] += chunkDataSize;
                 }
             }
-        } else {
-            OutputVerbose("\t\t[%2u] No temporal signaled\n", plane);
-            layeredTileData.push_back({{"Plane", plane}, {"temporal signaled", "No"}});
         }
     }
-    m_blockJson["Layered Tile Data"] = layeredTileData;
 
     return true;
 }
 
-bool Parser::parseAdditionalInfo(uint32_t blockSize)
+bool Parser::parseAdditionalInfo(AdditionalInfo& config, uint32_t blockSize)
 {
-    const AdditionalInfoType::Enum additionalInfoType =
-        AdditionalInfoType::FromValue(m_reader.ReadValue<uint8_t>());
+    const auto additionalInfoType = FromValue<AdditionalInfoType>(m_reader.ReadValue<uint8_t>());
+    config.info_type = additionalInfoType;
 
-    OutputVerbose("\t\t%-20s| %s\n", "Info Type", AdditionalInfoType::ToString(additionalInfoType));
-    m_blockJson["Info Type"] = AdditionalInfoType::ToString(additionalInfoType);
-
-    if (additionalInfoType == AdditionalInfoType::Enum::SFilter) {
+    if (additionalInfoType == AdditionalInfoType::S_FILTER) {
         const auto field0 = m_reader.ReadValue<uint8_t>();
+        config.s_filter = AdditionalInfoSFilter{FromValue<SFilterMode>((field0 & 0xE0) >> 5), // field0.11100000
+                                                static_cast<uint8_t>(field0 & 0x1F)}; // field0.00011111
+    } else if (additionalInfoType == AdditionalInfoType::BASE_HASH) {
+        config.base_hash = m_reader.ReadValue<uint64_t>();
+    } else if (additionalInfoType == AdditionalInfoType::SEI_PAYLOAD) {
+        auto seiPayloadType = FromValue<SEIPayloadType>(m_reader.ReadValue<uint8_t>());
+        config.sei = AdditionalInfoSEI{};
+        config.sei->sei_payload_type = seiPayloadType;
 
-        const SFilterMode::Enum sfilterMode = SFilterMode::FromValue((field0 & 0xE0) >> 5);
-        const uint8_t sfilterStrength = field0 & 0x1F;
-
-        OutputVerbose("\t\t%-20s| %s\n", "S-Filter Mode", SFilterMode::ToString(sfilterMode));
-        OutputVerbose("\t\t%-20s| %u\n", "S-Filter Strength", sfilterStrength);
-        m_blockJson["S-Filter Mode"] = SFilterMode::ToString(sfilterMode);
-        m_blockJson["S-Filter Strength"] = sfilterStrength;
-    } else if (additionalInfoType == AdditionalInfoType::Enum::BaseHash) {
-        const auto baseHash = m_reader.ReadValue<uint64_t>();
-        OutputVerbose("\t\t%-20s| %" PRIu64 "\n", "Base Hash", baseHash);
-        m_blockJson["Base Hash"] = baseHash;
-    } else if (additionalInfoType == AdditionalInfoType::Enum::SEIPayload) {
-        SEIPayloadType::Enum seiPayloadType = SEIPayloadType::FromValue(m_reader.ReadValue<uint8_t>());
-        OutputVerbose("\t\t%-20s| %s (%u)\n", "SEI Payload Type",
-                      SEIPayloadType::ToString(seiPayloadType), seiPayloadType);
-        m_blockJson["SEI Payload Type"] = SEIPayloadType::ToString(seiPayloadType);
-
-        if (seiPayloadType == SEIPayloadType::Enum::MasteringDisplayColourVolume) {
-            static constexpr uint32_t kMDCVNumPrimaries = 3;
-
-            uint16_t displayPrimariesX[kMDCVNumPrimaries];
-            uint16_t displayPrimariesY[kMDCVNumPrimaries];
-
-            for (uint32_t i = 0; i < kMDCVNumPrimaries; i++) {
-                displayPrimariesX[i] = m_reader.ReadValue<uint16_t>();
-                displayPrimariesY[i] = m_reader.ReadValue<uint16_t>();
+        if (seiPayloadType == SEIPayloadType::MASTERING_DISPLAY_COLOUR_VOLUME) {
+            AdditionalInfoSEIMasteringDisplayColourVolume masteringDisplayColourVolume;
+            for (size_t i = 0; i < masteringDisplayColourVolume.display_primaries_x.size(); ++i) {
+                masteringDisplayColourVolume.display_primaries_x[i] = m_reader.ReadValue<uint16_t>();
+                masteringDisplayColourVolume.display_primaries_y[i] = m_reader.ReadValue<uint16_t>();
             }
 
-            OutputVerbose("\t\t%-20s| %u %u %u\n", "Display Primaries X", displayPrimariesX[0],
-                          displayPrimariesX[1], displayPrimariesX[2]);
-            OutputVerbose("\t\t%-20s| %u %u %u\n", "Display Primaries Y", displayPrimariesY[0],
-                          displayPrimariesY[1], displayPrimariesY[2]);
-            m_blockJson["Display Primaries X"] = {displayPrimariesX[0], displayPrimariesX[1],
-                                                  displayPrimariesX[2]};
-            m_blockJson["Display Primaries Y"] = {displayPrimariesY[0], displayPrimariesY[1],
-                                                  displayPrimariesY[2]};
+            masteringDisplayColourVolume.white_point_x = m_reader.ReadValue<uint16_t>();
+            masteringDisplayColourVolume.white_point_y = m_reader.ReadValue<uint16_t>();
+            masteringDisplayColourVolume.max_display_mastering_luminance =
+                m_reader.ReadValue<uint32_t>();
+            masteringDisplayColourVolume.min_display_mastering_luminance =
+                m_reader.ReadValue<uint32_t>();
 
-            const auto whitePointX = m_reader.ReadValue<uint16_t>();
-            const auto whitePointY = m_reader.ReadValue<uint16_t>();
-
-            OutputVerbose("\t\t%-20s| %u\n", "White Point X", whitePointX);
-            OutputVerbose("\t\t%-20s| %u\n", "White Point Y", whitePointY);
-            m_blockJson["White Point X"] = whitePointX;
-            m_blockJson["White Point Y"] = whitePointY;
-
-            const auto maxDisplayMasteringLuminance = m_reader.ReadValue<uint32_t>();
-            const auto minDisplayMasteringLuminance = m_reader.ReadValue<uint32_t>();
-
-            OutputVerbose("\t\t%-20s| %u\n", "Max Display Mastering Luminance", maxDisplayMasteringLuminance);
-            OutputVerbose("\t\t%-20s| %u\n", "Min Display Mastering Luminance", minDisplayMasteringLuminance);
-            m_blockJson["Max Display Mastering Luminance"] = maxDisplayMasteringLuminance;
-            m_blockJson["Min Display Mastering Luminance"] = minDisplayMasteringLuminance;
-        } else if (seiPayloadType == SEIPayloadType::Enum::ContentLightLevelInfo) {
-            const auto maxContentLightLevel = m_reader.ReadValue<uint16_t>();
-            const auto maxPicAverageLightLevel = m_reader.ReadValue<uint16_t>();
-
-            OutputVerbose("\t\t%-20s| %u\n", "Max Content Light Level", maxContentLightLevel);
-            OutputVerbose("\t\t%-20s| %u\n", "Max Picture Average Light Level", maxPicAverageLightLevel);
-            m_blockJson["Max Content Light Level"] = maxContentLightLevel;
-            m_blockJson["Max Picture Average Light Level"] = maxPicAverageLightLevel;
-        } else if (seiPayloadType == SEIPayloadType::Enum::UserDataRegistered) {
+            config.sei->mastering_display_colour_volume = masteringDisplayColourVolume;
+        } else if (seiPayloadType == SEIPayloadType::CONTENT_LIGHT_LEVEL_INFO) {
+            config.sei->content_light_level_info = AdditionalInfoSEIContentLightLevelInfo{
+                m_reader.ReadValue<uint16_t>(), m_reader.ReadValue<uint16_t>()};
+        } else if (seiPayloadType == SEIPayloadType::USER_DATA_REGISTERED) {
             const auto countryCode = m_reader.ReadValue<uint8_t>();
             uint32_t readAmount = 0;
             bool bFound = false;
-
-            OutputVerbose("\t\t%-20s| 0x%02x\n", "T35 Country Code", countryCode);
-            m_blockJson["T35 Country Code"] = countryCode;
+            AdditionalInfoSEIUserDataRegistered userDataRegistered;
+            userDataRegistered.t35_country_code = countryCode;
 
             // UK country code.
             if (countryCode == kT35VNovaCode[0]) {
                 // Check for V-Nova code.
-                uint8_t t35Remainder[kT35CodeLength - 1] = {};
-                m_reader.ReadBytes(t35Remainder, kT35CodeLength - 1);
-                bFound = (memcmp(kT35VNovaCode + 1, t35Remainder, kT35CodeLength - 1) == 0);
+                std::array<uint8_t, kT35VNovaCode.size() - 1> t35Remainder = {};
+                m_reader.ReadBytes(t35Remainder.data(), kT35VNovaCode.size() - 1);
+                bFound = (memcmp(kT35VNovaCode.data() + 1, t35Remainder.data(),
+                                 kT35VNovaCode.size() - 1) == 0);
 
-                OutputVerbose("\t\t%-20s| [0x%02x, 0x%02x, 0x%02x]\n", "T35 Remaining Code",
-                              t35Remainder[0], t35Remainder[1], t35Remainder[2]);
+                userDataRegistered.t35_remaining_code = {t35Remainder[0], t35Remainder[1],
+                                                         t35Remainder[2]};
 
-                std::vector<std::string> t35HexVec = {kToHex(t35Remainder[0]), kToHex(t35Remainder[1]),
-                                                      kToHex(t35Remainder[2])};
-                m_blockJson["T35 Remaining Code"] = t35HexVec;
-
-                readAmount = kT35CodeLength;
+                readAmount = kT35VNovaCode.size();
             } else {
                 readAmount = 1;
             }
 
             if (bFound) {
                 // Parse V-Nova
-                OutputVerbose("\t\t%-20s\n", "V-Nova Payload");
-                m_bitstreamVersion = m_reader.ReadValue<uint8_t>();
-                OutputVerbose("\t\t%-20s| %u\n", "Bitstream Version", m_bitstreamVersion);
-                if (m_bitstreamVersion != kSupportedVersion) {
-                    VNLog::Error("\tERROR: Bitstream version %u is unsupported. "
-                                 "Supported version is %u.\n",
-                                 m_bitstreamVersion, kSupportedVersion);
+                auto bitstreamVersion = m_reader.ReadValue<uint8_t>();
+                if (bitstreamVersion != kSupportedVersion) {
+                    VNLOG_ERROR("Bitstream version %u is unsupported. "
+                                "Supported version is %u",
+                                bitstreamVersion, kSupportedVersion);
                     return false;
                 }
-                m_blockJson["V-Nova Payload"]["Bitstream Version"] = m_bitstreamVersion;
+                userDataRegistered.v_nova_payload = AdditionalInfoSEIVNovaPayload{bitstreamVersion};
             } else {
                 // Skip unknown
                 parseSkipBlock(blockSize - readAmount);
             }
+            config.sei->user_data_registered = userDataRegistered;
         } else {
-            OutputVerbose("\t\t%-20s|\n", "Invalid SEI Payload Type");
-            m_blockJson["SEI Error"] = "Invalid SEI Payload Type";
+            config.sei->sei_error = "Invalid SEI Payload Type";
         }
-    } else if (additionalInfoType == AdditionalInfoType::Enum::VUIParameters) {
-        const bool bIsAspectRatioInfoPresentFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Aspect Ratio Info Present",
-                      bIsAspectRatioInfoPresentFlag ? "true" : "false");
-        m_blockJson["Aspect Ratio Info Present"] = bIsAspectRatioInfoPresentFlag;
+    } else if (additionalInfoType == AdditionalInfoType::VUI_PARAMETERS) {
+        config.vui = AdditionalInfoVUI{};
+        config.vui->aspect_ratio_info_present = m_reader.ReadBit();
 
-        if (bIsAspectRatioInfoPresentFlag) {
+        if (config.vui->aspect_ratio_info_present) {
             const auto aspectRatioIdc = m_reader.ReadBits<uint8_t>();
-            OutputVerbose("\t\t%-20s| %u\n", "Aspect Ratio Idc", aspectRatioIdc);
-            m_blockJson["Aspect Ratio Idc"] = aspectRatioIdc;
+            config.vui->aspect_ratio_idc = aspectRatioIdc;
 
             if (aspectRatioIdc == kVUIAspectRatioIDCExtendedSAR) {
                 const auto sarWidth = m_reader.ReadBits<uint16_t>();
                 const auto sarHeight = m_reader.ReadBits<uint16_t>();
 
-                OutputVerbose("\t\t%-20s| %u\n", "SAR Width", sarWidth);
-                OutputVerbose("\t\t%-20s| %u\n", "SAR Height", sarHeight);
-                m_blockJson["SAR Width"] = sarWidth;
-                m_blockJson["SAR Height"] = sarHeight;
+                config.vui->sar_width = sarWidth;
+                config.vui->sar_height = sarHeight;
             }
         }
 
         // Overscan Info
-        const bool overscanInfoPresentFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Overscan Info Present", overscanInfoPresentFlag ? "true" : "false");
-        m_blockJson["Overscan Info Present"] = overscanInfoPresentFlag;
+        config.vui->overscan_info_present = m_reader.ReadBit();
 
-        if (overscanInfoPresentFlag) {
-            const bool overscanAppropriateFlag = m_reader.ReadBit();
-
-            OutputVerbose("\t\t%-20s| %s\n", "Overscan Appropriate Flag",
-                          overscanAppropriateFlag ? "true" : "false");
-            m_blockJson["Overscan Appropriate Flag"] = overscanAppropriateFlag;
+        if (config.vui->overscan_info_present) {
+            config.vui->overscan_appropriate_flag = m_reader.ReadBit();
         }
 
         // Video Signal Info
-        const bool videoSignalTypePresentFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Video Signal Type Present",
-                      videoSignalTypePresentFlag ? "true" : "false");
-        m_blockJson["Video Signal Type Present"] = videoSignalTypePresentFlag;
+        config.vui->video_signal_type_present = m_reader.ReadBit();
 
-        if (videoSignalTypePresentFlag) {
-            const auto videoFormat = m_reader.ReadBits<uint8_t, 3>();
-            const bool videoFullRangeFlag = m_reader.ReadBit();
-
-            OutputVerbose("\t\t%-20s| %u\n", "Video Format", videoFormat);
-            OutputVerbose("\t\t%-20s| %s\n", "Video Full Range", videoFullRangeFlag ? "true" : "false");
-
-            m_blockJson["Video Format"] = videoFormat;
-            m_blockJson["Video Full Range"] = videoFullRangeFlag;
+        if (config.vui->video_signal_type_present) {
+            config.vui->video_format = m_reader.ReadBits<uint8_t, 3>();
+            config.vui->video_full_range = m_reader.ReadBit();
 
             // Colour Description Info
             const bool colourDescriptionPresentFlag = m_reader.ReadBit();
-            OutputVerbose("\t\t%-20s| %s\n", "Colour Description Present",
-                          colourDescriptionPresentFlag ? "true" : "false");
-            m_blockJson["Colour Description Present"] = colourDescriptionPresentFlag;
+            config.vui->colour_description_present = colourDescriptionPresentFlag;
 
             if (colourDescriptionPresentFlag) {
-                const auto colourPrimaries = m_reader.ReadBits<uint8_t>();
-                const auto transferCharacteristics = m_reader.ReadBits<uint8_t>();
-                const auto matrixCoefficients = m_reader.ReadBits<uint8_t>();
-
-                OutputVerbose("\t\t%-20s| %u\n", "Colour Primaries", colourPrimaries);
-                OutputVerbose("\t\t%-20s| %u\n", "Transfer Characteristics", transferCharacteristics);
-                OutputVerbose("\t\t%-20s| %u\n", "Matrix Coefficients", matrixCoefficients);
-
-                m_blockJson["Colour Primaries"] = colourPrimaries;
-                m_blockJson["Transfer Characteristics"] = transferCharacteristics;
-                m_blockJson["Matrix Coefficients"] = matrixCoefficients;
+                config.vui->colour_primaries = m_reader.ReadBits<uint8_t>();
+                config.vui->transfer_characteristics = m_reader.ReadBits<uint8_t>();
+                config.vui->matrix_coefficients = m_reader.ReadBits<uint8_t>();
             }
         }
 
         // Chroma LOC Info
-        const bool chromaLOCInfoPresentFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Chroma LOC Info Present",
-                      chromaLOCInfoPresentFlag ? "true" : "false");
-        m_blockJson["Chroma LOC Info Present"] = chromaLOCInfoPresentFlag;
+        config.vui->chroma_loc_info_present = m_reader.ReadBit();
 
-        if (chromaLOCInfoPresentFlag) {
-            const uint32_t chromaSampleLocTypeTopField = m_reader.ReadUnsignedExpGolombBits();
-            const uint32_t chromaSampleLocTypeBottomField = m_reader.ReadUnsignedExpGolombBits();
-
-            OutputVerbose("\t\t%-20s| %u\n", "Chroma Sample LOC Type Top Field", chromaSampleLocTypeTopField);
-            OutputVerbose("\t\t%-20s| %u\n", "Chroma Sample LOC Type Bottom Field",
-                          chromaSampleLocTypeBottomField);
-            m_blockJson["Chroma Sample LOC Type Top Field"] = chromaSampleLocTypeTopField;
-            m_blockJson["Chroma Sample LOC Type Bottom Field"] = chromaSampleLocTypeBottomField;
+        if (config.vui->chroma_loc_info_present) {
+            config.vui->chroma_sample_loc_type_top_field = m_reader.ReadUnsignedExpGolombBits();
+            config.vui->chroma_sample_loc_type_bottom_field = m_reader.ReadUnsignedExpGolombBits();
         }
 
         // Flushing bits
         m_reader.ResetBitfield();
-    } else if (additionalInfoType == AdditionalInfoType::Enum::HDR) {
-        const bool enhancementDynamicRangeFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %u\n", "Tonemapper Location", enhancementDynamicRangeFlag);
+    } else if (additionalInfoType == AdditionalInfoType::HDR) {
+        config.hdr = AdditionalInfoHDR{m_reader.ReadBit(), m_reader.ReadBits<uint8_t, 5>(),
+                                       m_reader.ReadBit(), m_reader.ReadBit()};
 
-        const auto toneMapperType = m_reader.ReadBits<uint8_t, 5>();
-        OutputVerbose("\t\t%-20s| %u\n", "Tone Mapper Type", toneMapperType);
-
-        const bool tonemapperDataPresent = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Tonemapper Data Present", tonemapperDataPresent ? "true" : "false");
-        const bool deinterlacerEnabledFlag = m_reader.ReadBit();
-        OutputVerbose("\t\t%-20s| %s\n", "Deinterlacer Enabled", deinterlacerEnabledFlag ? "true" : "false");
-
-        m_blockJson["Tonemapper Location"] = enhancementDynamicRangeFlag;
-        m_blockJson["Tone Mapper Type"] = toneMapperType;
-        m_blockJson["Tonemapper Data Present"] = tonemapperDataPresent;
-        m_blockJson["Deinterlacer Enabled"] = deinterlacerEnabledFlag;
-
-        if (toneMapperType == 31) {
-            const auto toneMapperTypeExtended = m_reader.ReadBits<uint8_t, 8>();
-            OutputVerbose("\t\t%-20s| %u\n", "Tone Mapper Type Extended", toneMapperTypeExtended);
-            m_blockJson["Tone Mapper Type Extended"] = toneMapperTypeExtended;
+        if (config.hdr->tone_mapper_type == 31) {
+            config.hdr->tone_mapper_type_extended = m_reader.ReadBits<uint8_t, 8>();
         }
 
-        if (deinterlacerEnabledFlag) {
-            const auto deinterlacerType = m_reader.ReadBits<uint8_t, 4>();
-            OutputVerbose("\t\t%-20s| %u\n", "Deinterlacer Type", deinterlacerType);
-            const bool topFieldFirstFlag = m_reader.ReadBit();
-            OutputVerbose("\t\t%-20s| %s\n", "Top Field First", topFieldFirstFlag ? "true" : "false");
-
-            m_blockJson["Deinterlacer Type"] = deinterlacerType;
-            m_blockJson["Top Field First"] = topFieldFirstFlag;
+        if (config.hdr->deinterlacer_enabled) {
+            config.hdr->deinterlacer_type = m_reader.ReadBits<uint8_t, 4>();
+            config.hdr->top_field_first = m_reader.ReadBit();
 
             const auto zeroBits = m_reader.ReadBits<uint8_t, 3>();
             VNUnused(zeroBits);
         }
     } else {
         // Skip remainder of the block.
-        OutputVerbose("\t\tUnhandled Additional Info Type - Skipping\n");
-        m_blockJson["Unhandled Info Type"] = static_cast<uint32_t>(additionalInfoType);
+        config.unhandled_info_type = static_cast<uint32_t>(additionalInfoType);
         parseSkipBlock(blockSize - sizeof(uint8_t));
     }
 
@@ -1923,7 +1233,7 @@ bool Parser::parseCompressedEntropyEnabledFlags(std::vector<uint8_t>& destinatio
     auto symbol = m_reader.ReadValue<uint8_t>();
 
     if (symbol != 0 && symbol != 1) {
-        VNLog::Error("\tERROR: Invalid initial symbol state, expected to be 0 or 1");
+        VNLOG_ERROR("Invalid initial symbol state, expected to be 0 or 1");
         return false;
     }
 
@@ -1933,14 +1243,14 @@ bool Parser::parseCompressedEntropyEnabledFlags(std::vector<uint8_t>& destinatio
         try {
             runLength = static_cast<uint32_t>(m_reader.ReadMultiByteValue());
         } catch (const std::overflow_error&) {
-            VNLog::Error("\tERROR: Invalid run-length (overflow) in entropy flags RLE\n");
+            VNLOG_ERROR("Invalid run-length (overflow) in entropy flags RLE");
             return false;
         }
 
         // Safety first.
         if ((count + runLength) > total) {
-            VNLog::Error("\tERROR: Invalid run-length, attempting to decode more symbols that "
-                         "available\n");
+            VNLOG_ERROR("Invalid run-length, attempting to decode more symbols that "
+                        "available");
             return false;
         }
 
@@ -1955,31 +1265,63 @@ bool Parser::parseCompressedEntropyEnabledFlags(std::vector<uint8_t>& destinatio
     return true;
 }
 
-template <std::size_t N, typename... Args>
-void Parser::Output(const char (&fmt)[N], Args&&... args)
+VNAttributeFormat(printf, 2, 3) void Parser::Output(const char* fmt, ...)
 {
-    char buffer[1024];
-    if constexpr (sizeof...(args) == 0) {
-        std::snprintf(buffer, sizeof(buffer), "%s", fmt);
-    } else {
-        std::snprintf(buffer, sizeof(buffer), fmt, std::forward<Args>(args)...);
+    FILE* stdStream = m_config.analyzeLogFormat == LogFormat::TEXT ? stdout : stderr;
+    va_list args;
+    va_start(args, fmt);
+    output::writeToStdAndFile(stdStream, &m_logFile, fmt, args);
+    va_end(args);
+}
+
+VNAttributeFormat(printf, 2, 3) void Parser::OutputVerbose(const char* fmt, ...)
+{
+    if (m_config.subcommand.at(Subcommand::ANALYZE) == false) {
+        return;
+    }
+    if (m_config.analyzeVerboseOutput == false) {
+        return;
+    }
+    if (m_config.analyzeLogFormat != LogFormat::TEXT) {
+        return;
     }
 
-    if (m_config.logFormat == LogFormat::Text) {
-        const int length = fprintf(stdout, "%s", buffer);
-        if (m_logFile.is_open() && length > 0) {
-            m_logFile.write(buffer, length);
+    va_list args;
+    va_start(args, fmt);
+    FILE* stdStream = m_config.analyzeLogFormat == LogFormat::TEXT ? stdout : stderr;
+    output::writeToStdAndFile(stdStream, &m_logFile, fmt, args);
+    va_end(args);
+}
+
+void Parser::OutputConfig(nlohmann::ordered_json json)
+{
+    constexpr std::array skip = {"type", "size_type", "size"};
+
+    OutputVerbose(VN_STR_1 "typ:%-30s siz_type:%-8s siz:%-8s\n", "block", json["type"].dump().c_str(),
+                  json["size_type"].dump().c_str(), json["size"].dump().c_str());
+
+    for (const auto& [key, value] : json.items()) {
+        if (std::find(skip.begin(), skip.end(), key) != skip.end()) {
+            continue;
         }
-    } else {
-        fprintf(stderr, "%s", buffer);
+        OutputVerbose(VN_STR_2 "%s\n", key.c_str(), value.dump().c_str());
     }
 }
 
-template <std::size_t N, typename... Args>
-void Parser::OutputVerbose(const char (&fmt)[N], Args&&... args)
+void Parser::OutputLayeredConfig(nlohmann::ordered_json jsonWithLayers)
 {
-    if (m_config.verboseOutput) {
-        Output(fmt, std::forward<Args>(args)...);
+    OutputVerbose(VN_STR_1 "typ:%-30s siz_type:%-8s siz:%-8s\n", "block",
+                  jsonWithLayers["type"].dump().c_str(), jsonWithLayers["size_type"].dump().c_str(),
+                  jsonWithLayers["size"].dump().c_str());
+
+    for (const auto& json : jsonWithLayers["layers"]) {
+        nlohmann::ordered_json filtered;
+        for (const auto& [key, value] : json.items()) {
+            if (value.is_null() == false) {
+                filtered[key] = value;
+            }
+        }
+        OutputVerbose(VN_STR_2 "%s\n", "layer", filtered.dump().c_str());
     }
 }
 

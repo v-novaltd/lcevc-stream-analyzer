@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,52 +23,55 @@
 
 #include "extractor_bin.h"
 
-#include "config.h"
-#include "extractor/extractor.h"
+#include "helper/nal_unit.h"
+#include "utility/log_util.h"
 
-#include <array>
+#include <cstring>
 
 using namespace vnova::utility;
+using namespace vnova::helper;
 
 namespace vnova::analyzer {
-static constexpr std::array<uint8_t, 4> kAnnexBStartCode = {0x00, 0x00, 0x00, 0x01};
 
-ExtractorBin::ExtractorBin(const std::string& url, InputType type)
+ExtractorBin::ExtractorBin(const std::filesystem::path& url, InputType type)
     : m_payload()
 {
     if (type == InputType::BIN) {
-        bRawStream = true;
+        m_rawStream = true;
     }
 
     if (!m_reader.initialise(url)) {
-        VNLog::Error("Failed to initialise bin reader: %s\n", url.c_str());
+        VNLOG_ERROR("Failed to initialise bin reader: %s", url.c_str());
         return;
     }
-    bInitialized = true;
+    m_initialized = true;
 }
 
 ExtractorBin::~ExtractorBin() { m_reader.release(); }
 
-bool ExtractorBin::next(std::vector<LCEVC>& lcevcFrames, FrameQueue& /* frameBuffer */)
+bool ExtractorBin::next(std::vector<LCEVCFrame>& lcevcFrames, BaseFrameQueue& /* frameQueue */)
 {
     if (!m_reader.isValid()) {
         return false;
     }
 
-    LCEVCBinReadResult result = m_reader.readBlock(m_block);
-    if (result == LCEVCBinReadResult::NoMore) {
+    helper::bin::LCEVCBinReadResult result = m_reader.readBlock(m_block);
+    if (result == helper::bin::LCEVCBinReadResult::NoMore) {
         return false;
     }
-    if (result != LCEVCBinReadResult::Success) {
-        VNLog::Error("Failed to read LCEVC BIN block\n");
+    if (result != helper::bin::LCEVCBinReadResult::Success) {
+        VNLOG_ERROR("Failed to read LCEVC BIN block");
         return false;
     }
-    if (utility::LCEVCBinReader::parseBlockAsLCEVCPayload(m_block, m_payload)) {
-        if (std::memcmp(m_payload.data, kAnnexBStartCode.data(), kAnnexBStartCode.size()) == 0) {
-            bFourBytePrefix = true;
-        }
+    if (helper::bin::LCEVCBinReader::parseBlockAsLCEVCPayload(m_block, m_payload)) {
+        uint8_t startCodeSize = 0;
+        if (helper::matchAnnexBStartCode(m_payload.data, m_payload.dataSize, startCodeSize) == false) {
+            VNLOG_ERROR("Neither a 3 or 4 byte AnnexB start code");
+            return false;
+        };
+        m_fourBytePrefix = (startCodeSize == 4);
 
-        LCEVC lcevc;
+        LCEVCFrame lcevc;
         lcevc.data.assign(m_payload.data, m_payload.data + m_payload.dataSize);
         lcevc.pts = m_payload.presentationIndex;
         lcevc.dts = m_payload.decodeIndex;

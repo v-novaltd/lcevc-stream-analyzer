@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,6 +23,9 @@
 #ifndef VN_UTILITY_UNSIGNED_EXP_GOLOMB_H_
 #define VN_UTILITY_UNSIGNED_EXP_GOLOMB_H_
 
+#include "utility/platform.h"
+
+#include <cstdint>
 namespace vnova::utility {
 /*
  * UnsignedExpGolomb sequence helper class
@@ -37,7 +40,7 @@ class UnsignedExpGolomb
 {
 public:
     template <typename ReadBitFn>
-    static uint32_t decode(ReadBitFn readBitFn)
+    static uint32_t Decode(ReadBitFn readBitFn)
     {
         // Read all the prefix zeros, number of zeros = number of bits to read - 1.
         bool bit = readBitFn();

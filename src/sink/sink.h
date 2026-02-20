@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -41,12 +41,13 @@ public:
 
     virtual bool initialise() = 0;
     virtual void release() = 0;
-    virtual bool write(const LCEVC& lcevc) = 0;
+    virtual bool write(const helper::LCEVCFrame& lcevc) = 0;
 
     static std::unique_ptr<Sink> factory(const Config& config);
 
 protected:
     const Config& config;
+    size_t m_index = 0;
 };
 
 } // namespace vnova::analyzer

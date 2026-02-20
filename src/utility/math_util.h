@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,10 +23,17 @@
 #ifndef VN_UTILITY_MATH_UTIL_H_
 #define VN_UTILITY_MATH_UTIL_H_
 
-#include <type_traits>
+#include "utility/platform.h"
 
-namespace vnova {
-template <typename T, typename = typename std::enable_if<std::is_integral<T>::value>::type>
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <type_traits>
+#include <vector>
+
+namespace vnova::utility::math {
+
+template <typename T, typename = typename std::enable_if_t<std::is_integral_v<T>>>
 T ceilDiv(T a, T b)
 {
     VNAssert(b != 0);
@@ -36,6 +43,49 @@ T ceilDiv(T a, T b)
     return 0;
 }
 
-} // namespace vnova
+template <typename T, typename = typename std::enable_if_t<std::is_floating_point_v<T>>>
+bool approxEqual(T a, T b, T absoluteTol)
+{
+    VNAssert(absoluteTol > 0);
+    return std::abs(a - b) < absoluteTol;
+}
+
+template <typename T>
+std::vector<T> diff(const std::vector<T>& input)
+{
+    if (input.size() < 2) {
+        return {};
+    }
+
+    std::vector<T> delta(input.size() - 1);
+    std::transform(std::next(input.begin()), input.end(), input.begin(), delta.begin(),
+                   [](T a, T b) { return std::abs(a - b); });
+
+    return delta;
+}
+
+template <typename T>
+std::map<T, size_t> countOccurrences(const std::vector<T>& input)
+{
+    std::map<T, size_t> map;
+    for (const auto& elem : input) {
+        map[elem] += 1;
+    }
+    return map;
+}
+
+template <typename A, typename B>
+std::multimap<B, A> invertMap(const std::map<A, B>& map)
+{
+    std::multimap<B, A> inverted;
+
+    for (const auto& elem : map) {
+        inverted.insert(std::pair<B, A>(elem.second, elem.first));
+    }
+
+    return inverted;
+}
+
+} // namespace vnova::utility::math
 
 #endif // VN_UTILITY_MATH_UTIL_H_

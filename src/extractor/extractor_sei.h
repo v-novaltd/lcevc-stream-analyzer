@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -29,11 +29,11 @@ namespace vnova::analyzer {
 class ExtractorSEI final : public ExtractorDemuxer
 {
 public:
-    ExtractorSEI(const std::string& url, InputType type, const Config& config);
+    ExtractorSEI(const std::filesystem::path& url, helper::InputType type, const Config& config);
 
 private:
-    bool processNALUnit(const utility::DataBuffer& nalUnit, LCEVC& lcevc,
-                        utility::BaseType::Enum& baseType) final;
+    std::optional<helper::LCEVCFrame> parseNalIsLcevc(const utility::DataBuffer& nalUnit,
+                                                      helper::BaseType& baseType) override;
 };
 
 } // namespace vnova::analyzer

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,15 +20,29 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#ifndef VN_UTILITY_STRING_UTIL_H_
-#define VN_UTILITY_STRING_UTIL_H_
 
-#include <string>
-#include <string_view>
+#ifndef VN_HELPER_OUTPUT_UTIL_H_
+#define VN_HELPER_OUTPUT_UTIL_H_
 
-namespace vnova::utility::string {
-bool iEquals(std::string_view a, std::string_view b);
-std::string pathExtension(std::string_view path);
-} // namespace vnova::utility::string
+#include "utility/format_attribute.h"
 
-#endif // VN_UTILITY_STRING_UTIL_H_
+#include <cstdarg>
+#include <fstream>
+
+#define VN_STR_0 "* %-15s | "
+#define VN_STR_1 "\t%-20s | "
+#define VN_STR_2 "\t\t%-25s | "
+#define VN_STR_3 "\t\t\t%-25s | "
+
+namespace vnova::analyzer::output {
+
+VNAttributeFormat(printf, 3, 4) void writeToStdAndFile(FILE* stdStream, std::ofstream* logFile,
+                                                       const char* fmt, ...);
+
+// To handle already-captured vararg list.
+VNAttributeFormat(printf, 3, 0) void writeToStdAndFile(FILE* stdStream, std::ofstream* logFile,
+                                                       const char* fmt, va_list args);
+
+} // namespace vnova::analyzer::output
+
+#endif // VN_HELPER_OUTPUT_UTIL_H_

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -29,9 +29,8 @@
 #include <bitset>
 #include <cstring>
 #include <type_traits>
-#include <vector>
 
-namespace vnova::analyzer {
+namespace vnova::helper {
 // @brief Light-weight wrapper around a pointer & size to facilitate with
 // reading data
 //		   and specifically multi-byte values.
@@ -101,7 +100,7 @@ public:
     {
         T res = 0;
         ReadBytes(&res, sizeof(T));
-        return utility::ByteOrder<T>::toHost(res);
+        return utility::ByteOrder<T>::ToHost(res);
     }
 
     // @brief Helper for reading numValues of type T.
@@ -137,9 +136,9 @@ private:
     const uint8_t* m_data = nullptr;
     size_t m_dataLength = 0;
     uint64_t m_position = 0;
-    BitfieldDecoder<uint8_t> m_readBitfield = BitfieldDecoder<uint8_t>(0);
+    utility::BitfieldDecoder<uint8_t> m_readBitfield = utility::BitfieldDecoder<uint8_t>(0);
 };
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper
 
 #endif // VN_HELPER_STREAM_READER_H_

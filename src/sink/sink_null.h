@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,7 +23,6 @@
 #ifndef VN_SINK_SINK_NULL_H_
 #define VN_SINK_SINK_NULL_H_
 
-#include "bin/lcevc_bin.h"
 #include "sink.h"
 
 namespace vnova::analyzer {
@@ -37,7 +36,7 @@ public:
     {
         // No resources to release.
     }
-    bool write(const LCEVC& /*lcevc*/) override { return true; }
+    bool write(const helper::LCEVCFrame& /*lcevc*/) override { return true; }
 };
 
 } // namespace vnova::analyzer

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -22,59 +22,75 @@
  */
 #include "reorder.h"
 
-namespace vnova::analyzer {
-void Reorder::enqueue(const LCEVC& lcevc)
+#include "utility/log_util.h"
+
+#include <cinttypes>
+#include <optional>
+
+namespace vnova::helper {
+void Reorder::enqueue(const LCEVCFrame& lcevc)
 {
     m_data.push(lcevc);
     m_requiredQueueSize = lcevc.maxReorderFrames;
 }
 
-bool Reorder::dequeue(LCEVC& lcevc, FrameQueue& frameBuffer)
+bool Reorder::dequeue(LCEVCWithBase& lcevcWithBase, BaseFrameQueue& frameQueue)
 {
     if (m_requiredQueueSize == 0 || (!m_endOfStream && m_data.size() < m_requiredQueueSize) ||
-        m_data.empty() || (!getRawstream() && frameBuffer.data.empty() && getBasestream())) {
+        m_data.empty() || (!getRawstream() && frameQueue.empty() && getBasestream())) {
         return false;
     }
 
-    FrameInfo info;
-    if (!getRawstream() && getBasestream()) {
+    if (getBasestream()) {
         bool matchFound = false;
-        LCEVC lcevcItem = m_data.top();
+        LCEVCFrame lcevcItem = m_data.top();
 
-        while (!frameBuffer.data.empty()) {
-            info = frameBuffer.data.front();
-            frameBuffer.data.pop();
+        while (!frameQueue.empty()) {
+            BaseFrame info = frameQueue.front();
+            frameQueue.pop();
+
+            if (lcevcItem.pts == kInvalidPts) {
+                VNLOG_ERROR("Invalid PTS for LCEVC frame");
+                return false;
+            }
+            if (info.pts == kInvalidPts) {
+                VNLOG_ERROR("Invalid PTS for base frame");
+                return false;
+            }
 
             if (lcevcItem.pts == info.pts) {
-                lcevcItem.frameType = info.frameType;
-                lcevcItem.frameSize = static_cast<int64_t>(info.frameSize);
-
-                lcevc = std::move(lcevcItem);
+                lcevcWithBase.lcevc = std::move(lcevcItem);
+                lcevcWithBase.base = info;
 
                 m_data.pop();
                 matchFound = true;
                 break;
             }
+
+            VNLOG_ERROR("Mismatched pts for head of lcevc queue %d and head of frame queue %d",
+                        lcevcItem.pts, info.pts);
+            return false;
         }
 
         if (!matchFound) {
             return false;
         }
     } else {
-        lcevc = m_data.top();
+        lcevcWithBase.lcevc = m_data.top();
+        lcevcWithBase.base = std::nullopt;
         m_data.pop();
     }
 
-    if (m_hasOutput && lcevc.pts <= m_lastPTS) {
-        VNLog::Error("ERROR: lcevc frame with PTS:%" PRId64
-                     " is out of order. Please check file is not corrupted\n",
-                     lcevc.pts);
+    if (m_hasOutput && lcevcWithBase.lcevc.pts <= m_lastPTS) {
+        VNLOG_ERROR("LCEVC frame with PTS:%" PRId64
+                    " is out of order. Please check file is not corrupted",
+                    lcevcWithBase.lcevc.pts);
     }
 
-    m_lastPTS = lcevc.pts;
+    m_lastPTS = lcevcWithBase.lcevc.pts;
     m_hasOutput = true;
 
     return true;
 }
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper

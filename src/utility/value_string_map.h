@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,9 +23,7 @@
 #ifndef VN_UTILITY_VALUE_STRING_MAP_H_
 #define VN_UTILITY_VALUE_STRING_MAP_H_
 
-#include "string_util.h"
-
-#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace vnova::utility {
@@ -72,10 +70,10 @@ public:
         return *this;
     }
 
-    bool findValue(T& res, const std::string& name, T failedReturn) const
+    bool FindValue(T& res, const std::string& name, T failedReturn) const
     {
         for (typename StringPairVec::const_iterator it = m_pairs.begin(); it != m_pairs.end(); ++it) {
-            if (string::iEquals((*it).name, name)) {
+            if (IEquals((*it).name, name)) {
                 res = (*it).value;
                 return true;
             }
@@ -85,7 +83,7 @@ public:
         return false;
     }
 
-    std::vector<std::string> listStrings() const
+    std::vector<std::string> ListStrings() const
     {
         std::vector<std::string> strings;
         for (const ValueStringPair<T>& entry : m_pairs) {
@@ -96,6 +94,24 @@ public:
 
 private:
     StringPairVec m_pairs;
+
+    static bool IEquals(const std::string_view a, const std::string_view b)
+    {
+        if (a.length() != b.length()) {
+            return false;
+        }
+
+        auto aIt = std::begin(a); // NOLINT(readability-qualified-auto) - Does not work on Windows
+        auto bIt = std::begin(b); // NOLINT(readability-qualified-auto) - Does not work on Windows
+
+        for (; aIt != std::end(a) && bIt != std::end(b); ++aIt, ++bIt) {
+            if (std::toupper(*aIt) != std::toupper(*bIt)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 };
 
 } // namespace vnova::utility

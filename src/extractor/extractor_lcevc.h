@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -24,7 +24,7 @@
 #define VN_EXTRACTOR_EXTRACTOR_LCEVC_H_
 
 #include "extractor.h"
-#include "io/file_io.h"
+#include "utility/file_io.h"
 
 #include <utility>
 
@@ -33,10 +33,10 @@ namespace vnova::analyzer {
 class ExtractorLCEVC : public Extractor
 {
 public:
-    explicit ExtractorLCEVC(const std::string& url);
+    explicit ExtractorLCEVC(const std::filesystem::path& url);
     ~ExtractorLCEVC() override = default;
 
-    bool next(std::vector<LCEVC>& lcevcFrames, FrameQueue& frameBuffer) override;
+    bool next(std::vector<helper::LCEVCFrame>& lcevcFrames, helper::BaseFrameQueue& frameQueue) override;
 
 private:
     void indexAnnexB();

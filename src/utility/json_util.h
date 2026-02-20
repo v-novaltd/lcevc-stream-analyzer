@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -20,41 +20,19 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
-#include "string_util.h"
+#ifndef VN_UTILITY_JSON_UTIL_H_
+#define VN_UTILITY_JSON_UTIL_H_
 
-#include <algorithm>
-#include <cctype>
-#include <string_view>
+#include <json.hpp>
 
-namespace vnova::utility::string {
-bool iEquals(const std::string_view a, const std::string_view b)
-{
-    if (a.length() != b.length()) {
-        return false;
-    }
+#include <optional>
 
-    auto aIt = std::begin(a); // NOLINT(readability-qualified-auto) - Does not work on Windows
-    auto bIt = std::begin(b); // NOLINT(readability-qualified-auto) - Does not work on Windows
+namespace vnova::utility::json {
 
-    for (; aIt != std::end(a) && bIt != std::end(b); ++aIt, ++bIt) {
-        if (std::toupper(*aIt) != std::toupper(*bIt)) {
-            return false;
-        }
-    }
+std::optional<nlohmann::json> read(const std::filesystem::path& path);
+bool write(const std::filesystem::path& path, const nlohmann::ordered_json& data);
+bool dump(FILE* file, const nlohmann::ordered_json& data);
 
-    return true;
-}
+} // namespace vnova::utility::json
 
-std::string pathExtension(std::string_view path)
-{
-    size_t part = path.rfind('.');
-    std::string res;
-
-    if (part != std::string::npos) {
-        res = path.substr(part + 1);
-    }
-
-    return res;
-}
-
-} // namespace vnova::utility::string
+#endif

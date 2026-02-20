@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -23,9 +23,7 @@
 #ifndef VN_UTILITY_MULTI_BYTE_H_
 #define VN_UTILITY_MULTI_BYTE_H_
 
-#include <stdint.h>
-
-#include <limits>
+#include <cstdint>
 #include <stdexcept>
 
 namespace vnova::utility {
@@ -43,12 +41,13 @@ class MultiByte
 {
 public:
     template <typename ReadFn, typename... Args>
-    static uint32_t decode(ReadFn readFn, Args... args)
+    static uint32_t Decode(ReadFn readFn, Args... args)
     {
         uint8_t byte = 0;
         uint32_t result = 0;
         uint32_t bytesRead = 0;
 
+        // NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while)
         do {
             byte = readFn(args...);
             result = (result << 7) | uint32_t(byte & 0x7F);

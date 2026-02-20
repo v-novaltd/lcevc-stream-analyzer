@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2025 V-Nova International Limited
+ * Copyright (C) 2014-2026 V-Nova International Limited
  *
  *     * All rights reserved.
  *     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -27,7 +27,7 @@
 
 #include <cstring>
 
-namespace vnova::analyzer {
+namespace vnova::helper {
 StreamReader::StreamReader() = default;
 
 void StreamReader::Reset(const uint8_t* data, size_t dataLength)
@@ -57,16 +57,16 @@ void StreamReader::SeekForward(uint64_t numBytes) { m_position += numBytes; }
 
 bool StreamReader::ReadBit()
 {
-    if (m_readBitfield.getShiftAccumulator() == 0 || m_readBitfield.getShiftAccumulator() == 8) {
-        m_readBitfield.reset(BitfieldReverse(ReadValue<uint8_t>()));
+    if (m_readBitfield.GetShiftAccumulator() == 0 || m_readBitfield.GetShiftAccumulator() == 8) {
+        m_readBitfield.Reset(utility::bitfieldReverse(ReadValue<uint8_t>()));
     }
-    const auto bit = m_readBitfield.getField<uint8_t>(1);
+    const auto bit = m_readBitfield.GetField<uint8_t>(1);
     return (bit != 0);
 }
 
 uint64_t StreamReader::ReadMultiByteValue()
 {
-    return vnova::utility::MultiByte::decode([this]() {
+    return utility::MultiByte::Decode([this]() {
         uint8_t byte = 0;
         ReadBytes(&byte, 1);
         return byte;
@@ -75,9 +75,9 @@ uint64_t StreamReader::ReadMultiByteValue()
 
 uint32_t StreamReader::ReadUnsignedExpGolombBits()
 {
-    return vnova::utility::UnsignedExpGolomb::decode([this]() { return this->ReadBit(); });
+    return utility::UnsignedExpGolomb::Decode([this]() { return this->ReadBit(); });
 }
 
-void StreamReader::ResetBitfield() { m_readBitfield.reset(0); }
+void StreamReader::ResetBitfield() { m_readBitfield.Reset(0); }
 
-} // namespace vnova::analyzer
+} // namespace vnova::helper
