@@ -20,28 +20,39 @@ ANY ONWARD DISTRIBUTION, WHETHER STAND-ALONE OR AS PART OF ANY OTHER PROJECT,
 REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
 BSD-3-CLAUSE-CLEAR LICENSE.
 -->
+
 # Changelog
+
+## 2.0.1
+
+### Fixes
+
+- Correct release lint error.
 
 ## 2.0.0
 
 ### Features
+
 - Subcommand-based CLI to separate core ANALYZE/EXTRACT features from other new features
-- Improved JSON output hierarchy which closely matches LCEVC spec 
+- Improved JSON output hierarchy which closely matches LCEVC spec
 - Clearer human-readable terminal output formatting
 - Warn user if inconsistent PTS value increment is detected
 - Warn user if the tool failed to parse all frames
 - Add network buffer simulation feature which can report plottable buffer fill over time data
 
 ### Fixes
+
 - Fix frame byte accounting and ordering logic
-- Correct reported base frame sizes and LCEVC frame association 
+- Correct reported base frame sizes and LCEVC frame association
 - Correct summary bitrate calculations
 - Fix VVC NAL header decoding in MP4 files
 
 ### Dependencies / Compatibility
+
 - Bump FFmpeg to 8.0 to enable VVC frame type parsing
 
 ### Docs
+
 - Add "Quick start" section
 - Add subcommands explainer and update docs
 

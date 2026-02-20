@@ -28,7 +28,6 @@
 #include "helper/nal_unit.h"
 #include "utility/byte_order.h"
 #include "utility/log_util.h"
-#include "utility/platform.h"
 #include "utility/span.h"
 
 #include <algorithm>
