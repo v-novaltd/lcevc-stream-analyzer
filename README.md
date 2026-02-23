@@ -73,11 +73,11 @@ LCEVC‑enhanced video streams.
 
 1. Unzip the `.zip` file to a directory named `lcevc_stream_analyzer` or similar.
 
-1. Download pre-built ffmpeg v8.0 archive: [`ffmpeg-n8.0-latest-win64-gpl-8.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.0-latest-win64-gpl-8.0.zip).
+1. Download pre-built ffmpeg v8.0 archive: [`ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip).
 
-1. Open the `ffmpeg-n8.0-latest-win64-gpl-8.0.zip` file in Windows Explorer.
+1. Open the `ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip` file in Windows Explorer.
 
-1. Copy all files (including `.dll`s) from `ffmpeg-n8.0-latest-win64-gpl-8.0\bin` to `lcevc_stream_analyzer\bin`.
+1. Copy all files (including `.dll`s) from `ffmpeg-n8.0-latest-win64-gpl-shared-8.0\bin` to `lcevc_stream_analyzer\bin`.
 
 1. In `lcevc_stream_analyzer\bin`, the following files should be listed (the numbers in the `av` `dll`s do matter; ensure the correct version of FFmpeg was downloaded):
 
@@ -246,7 +246,7 @@ lcevc_stream_analyzer --input input.mp4     ANALYZE --output stream.json     EXT
 
 ## Changelog
 
-See CHANGELOG.md
+See [CHANGELOG.md](https://github.com/v-novaltd/lcevc-stream-analyzer/blob/main/CHANGELOG.md)
 
 ## Known Issues
 
