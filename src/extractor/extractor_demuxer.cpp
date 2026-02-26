@@ -20,6 +20,7 @@
  * REMAINS SUBJECT TO THE EXCLUSION OF PATENT LICENSES PROVISION OF THE
  * BSD-3-CLAUSE-CLEAR LICENSE.
  */
+#include "app/config.h"
 #include "utility/platform.h"
 // platform.h first to avoid min/max macro Windows issue.
 
@@ -476,6 +477,7 @@ ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType t
 {
     if (!m_packet) {
         VNLOG_ERROR("Failed to allocate AVPacket");
+        m_error = true;
         return;
     }
 
@@ -484,7 +486,8 @@ ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType t
         case InputType::MP4: {
             fmt = av_find_input_format("mp4");
             if (fmt == nullptr) {
-                VNLOG_INFO("Failed to turn input_type into a valid input format for mp4");
+                VNLOG_INFO("Failed to turn type into a valid input format for mp4");
+                m_error = true;
             }
         } break;
         case InputType::ES: {
@@ -500,7 +503,8 @@ ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType t
                 } break;
                 default: {
                     if (fmt == nullptr) {
-                        VNLOG_INFO("Failed to turn base_type into a valid input format for es");
+                        VNLOG_INFO("Failed to turn type into a valid input format for es");
+                        m_error = true;
                     }
                     break;
                 }
@@ -509,7 +513,8 @@ ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType t
         case InputType::TS: {
             fmt = av_find_input_format("mpegts");
             if (fmt == nullptr) {
-                VNLOG_INFO("Failed to turn input_type into a valid input format for ts");
+                VNLOG_INFO("Failed to turn type into a valid input format for ts");
+                m_error = true;
             }
         } break;
         default: break;
@@ -517,15 +522,20 @@ ExtractorDemuxer::ExtractorDemuxer(const std::filesystem::path& url, InputType t
 
     if (avformat_open_input(&m_formatContext, url.string().c_str(), fmt, nullptr) != 0) {
         VNLOG_ERROR("Could not open input file ");
+        m_error = true;
         return;
     }
     if (avformat_find_stream_info(m_formatContext, nullptr) < 0) {
         VNLOG_ERROR("Could not find stream info ");
+        m_error = true;
         return;
     }
 
     fixMisclassifiedStreams(*m_formatContext);
-    determineStreamTypes();
+
+    if (determineStreamTypes() == false) {
+        m_error = true;
+    }
     m_durationSec = (double)m_formatContext->duration / AV_TIME_BASE;
     m_initialized = true;
 }
@@ -544,7 +554,7 @@ ExtractorDemuxer::~ExtractorDemuxer()
     }
 }
 
-void ExtractorDemuxer::determineStreamTypes()
+bool ExtractorDemuxer::determineStreamTypes()
 {
     for (unsigned int i = 0; i < m_formatContext->nb_streams; ++i) {
         AVStream* stream = m_formatContext->streams[i];
@@ -565,7 +575,14 @@ void ExtractorDemuxer::determineStreamTypes()
             VNLOG_INFO("Stream index %d contains LCEVC data", stream->index);
             m_lcevcStreamIndex = stream->index;
         } else if (isBaseType(codecID)) {
-            VNLOG_INFO("Stream index %d contains %s video data", stream->index, avcodec_get_name(codecID));
+            const auto* codecName = avcodec_get_name(codecID);
+            VNLOG_INFO("Stream index %d contains %s video data", stream->index, codecName);
+            const auto baseType = helper::baseTypeFromString(codecName);
+            if (checkBaseTypeIsAllowed(baseType) == false) {
+                m_error = true;
+                return false;
+            }
+
             // Guarding rather than assigning prevents subesquent non-video streams from putting this back to false.
             m_hasBaseVideoStream = true;
             m_baseVideoStreamIsSizeCountable = isBaseTypeSizeCountable(codecID);
@@ -586,8 +603,10 @@ void ExtractorDemuxer::determineStreamTypes()
             m_lvccPresent = true;
         } else {
             VNLOG_INFO("InValid LVCC Atom found");
+            return false;
         }
     }
+    return true;
 }
 
 bool ExtractorDemuxer::storeLcevcFrame(LCEVCFrame& lcevc)

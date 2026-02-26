@@ -61,7 +61,7 @@ std::unique_ptr<Extractor> Extractor::factory(const Config& config)
     const std::filesystem::path& sourcePath = config.inputPath;
 
     switch (inputType) {
-        case InputType::Unknown: break;
+        case InputType::UNKNOWN: break;
         case InputType::ES: [[fallthrough]];
         case InputType::TS: {
             extractor = std::make_unique<ExtractorSEI>(sourcePath, inputType, config);
@@ -90,6 +90,11 @@ std::unique_ptr<Extractor> Extractor::factory(const Config& config)
     if (!extractor->getInitialized()) {
         return nullptr;
     }
+
+    if (extractor->getError() == true) {
+        return nullptr;
+    }
+
     return extractor;
 }
 

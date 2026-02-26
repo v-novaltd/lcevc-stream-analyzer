@@ -23,6 +23,18 @@ BSD-3-CLAUSE-CLEAR LICENSE.
 
 # Changelog
 
+## 2.1.0
+
+### Breaking Changes
+
+- Changed two word command line args with underscores `--ts_pid` `--base_type` to use dashes `--ts-pid` `--base-type`.
+- Changed out-of-spec output keys prefixed with `x_` to be prefixed just with `_`.
+- Disabled VP8, VP9, AV1, VC6 and WEBM support as these codecs/containers are not currently fully supported.
+
+### Documentation
+
+- Updated README.md examples to match CLI interface and enabled codecs/containers.
+
 ## 2.0.2
 
 ### Fixes

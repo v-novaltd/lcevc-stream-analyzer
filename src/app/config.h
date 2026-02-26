@@ -35,6 +35,9 @@
 
 namespace vnova::analyzer {
 
+bool checkInputTypeIsAllowed(helper::InputType type);
+bool checkBaseTypeIsAllowed(helper::BaseType type);
+
 struct Config
 {
 public:
@@ -42,7 +45,7 @@ public:
 
     // Generic options
     std::filesystem::path inputPath;
-    helper::InputType inputType = helper::InputType::Unknown;
+    helper::InputType inputType = helper::InputType::UNKNOWN;
     int32_t tsPID = -1;
     double inputFramerate = 0.0;
     helper::BaseType baseType = helper::BaseType::INVALID;

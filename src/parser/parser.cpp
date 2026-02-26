@@ -191,12 +191,26 @@ namespace {
         return 0;
     }
 
+    std::optional<FrameBase> baseFrameAsOutputStruct(const uint64_t frameCount, const int64_t baseWireSize,
+                                                     const int64_t combinedWireSize,
+                                                     const std::optional<BaseFrame> frameOpt)
+    {
+        if (frameOpt.has_value() == false) {
+            return std::nullopt;
+        }
+        const auto& frame = frameOpt.value();
+        return FrameBase{frameCount,   std::string(toString(frame.type)),
+                         frame.dts,    frame.pts,
+                         frame.height, frame.width,
+                         baseWireSize, combinedWireSize};
+    }
+
 } // namespace
 
 Parser::Parser(const Config& config)
     : m_config(config)
 {
-    if (!config.analyzeLogPath.empty()) {
+    if ((config.analyzeLogFormat == LogFormat::TEXT) && (config.analyzeLogPath.empty() == false)) {
         m_logFile.open(config.analyzeLogPath, std::ios::trunc);
         if (!m_logFile.is_open()) {
             VNLOG_ERROR("Failed to open log file %s", config.analyzeLogPath.c_str());
@@ -209,7 +223,6 @@ Parser::Parser(const Config& config)
 std::optional<ParsedFrame> Parser::parse(const LCEVCWithBase& lcevcWithBase)
 {
     const auto& lcevc = lcevcWithBase.lcevc;
-    const BaseFrame frame = lcevcWithBase.base.value_or(DEFAULT_FRAME_INFO);
 
     const size_t lcevcPayloadSize = lcevc.data.size();
     const auto* payloadHead = lcevc.data.data();
@@ -245,22 +258,12 @@ std::optional<ParsedFrame> Parser::parse(const LCEVCWithBase& lcevcWithBase)
     m_lcevcLayerSize += lcevcPayloadSize;
 
     ParsedFrame parsedFrame{
-        m_frameCount,
-        lcevc,
-        m_isBaseStreamSizeCountable ? std::make_optional(frame) : std::nullopt,
-        lcevcWireSize,
-        baseWireSize,
-        combinedWireSize,
+        m_frameCount, lcevc, lcevcWithBase.base, lcevcWireSize, baseWireSize, combinedWireSize,
     };
 
     if (m_config.subcommand.at(Subcommand::ANALYZE) == true) {
         printFrame(parsedFrame, nalType, lcevcRawSize);
     }
-
-    FrameBase jsonBase = {m_frameCount, std::string(toString(frame.type)),
-                          frame.dts,    frame.pts,
-                          frame.height, frame.width,
-                          baseWireSize, combinedWireSize};
 
     FrameLCEVC jsonLCEVC = {toString(nalType), static_cast<int64_t>(lcevcPayloadSize), lcevcRawSize,
                             lcevcWireSize};
@@ -280,7 +283,9 @@ std::optional<ParsedFrame> Parser::parse(const LCEVCWithBase& lcevcWithBase)
         }
     }
 
-    m_jsonLog.frames.push_back(Frame{jsonBase, jsonLCEVC});
+    m_jsonLog.frames.push_back(
+        Frame{baseFrameAsOutputStruct(m_frameCount, baseWireSize, combinedWireSize, lcevcWithBase.base),
+              jsonLCEVC});
 
     return parsedFrame;
 }
@@ -625,10 +630,10 @@ bool Parser::parseGlobalConfig(GlobalConfig& config)
     if (config.resolution_type == kResolutionTypeCustom) {
         config.custom_resolution->at(0) = m_reader.ReadValue<uint16_t>();
         config.custom_resolution->at(1) = m_reader.ReadValue<uint16_t>();
-        config.x_resolution = config.custom_resolution.value();
+        config._resolution = config.custom_resolution.value();
     } else if (config.resolution_type > 0 && config.resolution_type < kResolutionTypeLUT.size()) {
         const SyntaxResolution& res = kResolutionTypeLUT[config.resolution_type];
-        config.x_resolution = {res.width, res.height};
+        config._resolution = {res.width, res.height};
     }
 
     if (config.chroma_step_width_flag) {
@@ -659,8 +664,8 @@ bool Parser::parsePictureConfig(PictureConfig& config, const FrameTypeLCEVC nalT
         config.quant_matrix_mode = FromValue<QuantMatrixMode>((field0 & 0x70) >> 4); // field0.01110000
         config.dequant_offset_signalled_flag = ((field0 & 0x08) >> 3) != 0; // field0.00001000
         config.step_width_sublayer1_enabled_flag = (field0 & 0x01) != 0;    // field0.00000001
-        config.step_width_sublayer2 = (field1 & 0xFFFE) >> 1; // field1.1111111111111110
-        config.dithering_control_flag = (field1 & 0x01) != 0; // field1.0000000000000001
+        config.step_width_sublayer2 = static_cast<uint16_t>((field1 & 0xFFFE) >> 1); // field1.1111111111111110
+        config.dithering_control_flag = static_cast<uint16_t>((field1 & 0x01) != 0); // field1.0000000000000001
 
         config.temporal_signalling_present_flag =
             globalConfig.temporal_enabled_flag && !config.temporal_refresh_bit_flag;
@@ -770,23 +775,23 @@ bool Parser::parseEncodedData(EncodedData& config)
     const auto& pictureConfig = m_pictureConfig.value();
 
     // RLE/Prefix Coding choice.
-    config.x_plane_count = getPlaneCount(globalConfig.planes_type);
-    config.x_coefficient_group_count = getCoeffGroupCount(globalConfig.transform_type);
+    config._plane_count = getPlaneCount(globalConfig.planes_type);
+    config._coefficient_group_count = getCoeffGroupCount(globalConfig.transform_type);
     int64_t chunkCount = (pictureConfig.no_enhancement_bit_flag
                               ? 0
-                              : (2 * config.x_plane_count * config.x_coefficient_group_count)) +
-                         (pictureConfig.temporal_signalling_present_flag ? config.x_plane_count : 0);
-    config.x_surface_header_bytes = (((chunkCount * surfacePropCount) + 7) & ~7) >> 3;
+                              : (2 * config._plane_count * config._coefficient_group_count)) +
+                         (pictureConfig.temporal_signalling_present_flag ? config._plane_count : 0);
+    config._surface_header_bytes = (((chunkCount * surfacePropCount) + 7) & ~7) >> 3;
 
     std::array<uint8_t, maxSurfacePropByteCount> surfaceProps = {0};
-    m_reader.ReadBytes(surfaceProps.data(), static_cast<uint64_t>(config.x_surface_header_bytes));
+    m_reader.ReadBytes(surfaceProps.data(), static_cast<uint64_t>(config._surface_header_bytes));
     BitfieldDecoderStream<uint8_t> surfacePropsDecoder(
-        surfaceProps.data(), static_cast<uint32_t>(config.x_surface_header_bytes));
+        surfaceProps.data(), static_cast<uint32_t>(config._surface_header_bytes));
 
-    for (int64_t planeIndex = 0; planeIndex < config.x_plane_count; ++planeIndex) {
+    for (int64_t planeIndex = 0; planeIndex < config._plane_count; ++planeIndex) {
         if (pictureConfig.no_enhancement_bit_flag == 0) {
             for (const auto& sublayer : EncodedDataSubLayerList) {
-                for (int64_t coeffGroup = 0; coeffGroup < config.x_coefficient_group_count; ++coeffGroup) {
+                for (int64_t coeffGroup = 0; coeffGroup < config._coefficient_group_count; ++coeffGroup) {
                     EncodedDataLayer layer;
                     layer.plane = planeIndex;
                     layer.sublayer = sublayer;
@@ -864,25 +869,25 @@ bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
 
     const uint16_t tileWidth = tileDimensions->at(0);
     const uint16_t tileHeight = tileDimensions->at(1);
-    config.x_tile_dimensions = {tileWidth, tileHeight};
+    config._tile_dimensions = {tileWidth, tileHeight};
 
-    config.x_level2_tile_count = static_cast<int32_t>(calculateNumTilesLevel2(
-        globalConfig.x_resolution[0], globalConfig.x_resolution[1], tileWidth, tileHeight));
-    config.x_level1_tile_count = static_cast<int32_t>(
-        calculateNumTilesLevel1(globalConfig.x_resolution[0], globalConfig.x_resolution[1],
-                                tileWidth, tileHeight, globalConfig.scaling_mode_level2));
+    config._level2_tile_count = static_cast<int32_t>(calculateNumTilesLevel2(
+        globalConfig._resolution[0], globalConfig._resolution[1], tileWidth, tileHeight));
+    config._level1_tile_count = static_cast<int32_t>(
+        calculateNumTilesLevel1(globalConfig._resolution[0], globalConfig._resolution[1], tileWidth,
+                                tileHeight, globalConfig.scaling_mode_level2));
 
-    config.x_plane_count = static_cast<int32_t>(getPlaneCount(globalConfig.planes_type));
-    config.x_coefficient_group_count =
+    config._plane_count = static_cast<int32_t>(getPlaneCount(globalConfig.planes_type));
+    config._coefficient_group_count =
         static_cast<int32_t>(getCoeffGroupCount(globalConfig.transform_type));
 
     // Parse per-layer RLE only flag
     const size_t layerRLEOnlyFlagCount =
         (pictureConfig.no_enhancement_bit_flag
              ? 0
-             : static_cast<size_t>(kNumLevels * config.x_coefficient_group_count * config.x_plane_count)) +
+             : static_cast<size_t>(kNumLevels * config._coefficient_group_count * config._plane_count)) +
         (static_cast<size_t>(pictureConfig.temporal_signalling_present_flag) *
-         static_cast<size_t>(config.x_plane_count));
+         static_cast<size_t>(config._plane_count));
     const size_t numBytesRLEOnlyFlags = ((layerRLEOnlyFlagCount + 7U) & ~static_cast<size_t>(7)) >> 3;
 
     if (numBytesRLEOnlyFlags > (std::numeric_limits<uint32_t>::max)()) {
@@ -898,10 +903,10 @@ bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
     const size_t chunkCount =
         (pictureConfig.no_enhancement_bit_flag
              ? 0U
-             : (static_cast<size_t>(config.x_plane_count * config.x_coefficient_group_count) *
-                static_cast<size_t>(config.x_level1_tile_count + config.x_level2_tile_count))) +
+             : (static_cast<size_t>(config._plane_count * config._coefficient_group_count) *
+                static_cast<size_t>(config._level1_tile_count + config._level2_tile_count))) +
         (static_cast<size_t>(pictureConfig.temporal_signalling_present_flag) *
-         static_cast<size_t>(config.x_plane_count) * static_cast<size_t>(config.x_level2_tile_count));
+         static_cast<size_t>(config._plane_count) * static_cast<size_t>(config._level2_tile_count));
 
     std::vector<uint8_t> entropyEnabledFlags(chunkCount, 0);
 
@@ -930,14 +935,14 @@ bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
     int32_t chunkIndex = 0;
 
     // Parsing of chunk size
-    for (int64_t plane = 0; plane < config.x_plane_count; plane++) {
+    for (int64_t plane = 0; plane < config._plane_count; plane++) {
         if (pictureConfig.no_enhancement_bit_flag == false) {
             for (const auto& sublayer : EncodedDataSubLayerList) {
                 const int64_t tileCount =
-                    (sublayer == EncodedDataSubLayer::SUBLAYER_1 ? config.x_level2_tile_count
-                                                                 : config.x_level1_tile_count);
+                    (sublayer == EncodedDataSubLayer::SUBLAYER_1 ? config._level2_tile_count
+                                                                 : config._level1_tile_count);
 
-                for (int32_t coeffGroup = 0; coeffGroup < config.x_coefficient_group_count; coeffGroup++) {
+                for (int32_t coeffGroup = 0; coeffGroup < config._coefficient_group_count; coeffGroup++) {
                     const auto rleOnlyFlag = rleFlagDecoder.ReadBit();
 
                     std::vector<uint32_t> decompressedChunkSizes;
@@ -1012,7 +1017,7 @@ bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
             if (compressionType.compression_type_size_per_tile != TiledSizeCompressionType::NONE) {
                 // Determine number of enabled flags.
                 uint32_t signalledSizes = 0;
-                for (int32_t i = chunkIndex; i < chunkIndex + config.x_level2_tile_count; ++i) {
+                for (int32_t i = chunkIndex; i < chunkIndex + config._level2_tile_count; ++i) {
                     signalledSizes += entropyEnabledFlags[i] ? 1 : 0;
                 }
 
@@ -1021,7 +1026,7 @@ bool Parser::parseEncodedTileData(EncodedTileData& config, uint32_t blockSize)
                                    decompressedChunkSizes);
             }
 
-            for (int32_t tile = 0; tile < config.x_level2_tile_count; tile++) {
+            for (int32_t tile = 0; tile < config._level2_tile_count; tile++) {
                 EncodedTileDataLayer layer;
                 layer.plane = static_cast<uint32_t>(plane);
                 layer.tile = static_cast<uint32_t>(tile);
@@ -1118,7 +1123,7 @@ bool Parser::parseAdditionalInfo(AdditionalInfo& config, uint32_t blockSize)
                 userDataRegistered.t35_remaining_code = {t35Remainder[0], t35Remainder[1],
                                                          t35Remainder[2]};
 
-                readAmount = kT35VNovaCode.size();
+                readAmount = static_cast<uint32_t>(kT35VNovaCode.size());
             } else {
                 readAmount = 1;
             }

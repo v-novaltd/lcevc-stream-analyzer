@@ -338,7 +338,7 @@ DetectedInputFormat detectInputFormatFromMemory(const uint8_t* data, size_t size
 
     auto probe = detectElementaryStream(data, size);
     applyElementaryDetection(probe, detected);
-    if (detected.inputType == InputType::Unknown && probe.isAnnexB) {
+    if (detected.inputType == InputType::UNKNOWN && probe.isAnnexB) {
         // Default unknown Annex B to elementary; if no base type was found but the codec
         // evidence pointed to LCEVC, promote to LCEVC raw stream.
         if (probe.codec == CodecType::LCEVC) {
@@ -349,7 +349,7 @@ DetectedInputFormat detectInputFormatFromMemory(const uint8_t* data, size_t size
             detected.baseType = BaseType::UNKNOWN;
         }
     }
-    if (detected.inputType == InputType::Unknown && probe.isAvcc) {
+    if (detected.inputType == InputType::UNKNOWN && probe.isAvcc) {
         detected.inputType = InputType::ES;
         detected.baseType = BaseType::UNKNOWN;
         detected.isLikelyAvcc = true;

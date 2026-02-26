@@ -29,8 +29,8 @@ LCEVC‑enhanced video streams.
 ## Features
 
 - Parses and analyzes LCEVC-enhanced video streams
-- Supports multiple input formats: TS, SEI, NAL, WebM, MP4, BIN
-- Compatible with base codecs: H264, HEVC, VVC, and partial support for AV1, VP9
+- Supports multiple input formats: TS, SEI, NAL, MP4, BIN
+- Compatible with base codecs: H264, HEVC, VVC
 - Can export LCEVC data from muxed stream file in bin, raw, or length-delimited formats
 - Supports JSON and verbose text logging for debugging and analysis
 - Standalone, cross-platform tool: works on Linux, macOS and Windows
@@ -64,6 +64,7 @@ LCEVC‑enhanced video streams.
 
     # Run the program
     cd "build/install/bin/"
+    export LD_LIBRARY_PATH="$(pwd)/../lib:$LD_LIBRARY_PATH"
     ./lcevc_stream_analyzer --help
     ```
 
@@ -79,19 +80,16 @@ LCEVC‑enhanced video streams.
 
 1. Copy all files (including `.dll`s) from `ffmpeg-n8.0-latest-win64-gpl-shared-8.0\bin` to `lcevc_stream_analyzer\bin`.
 
-1. In `lcevc_stream_analyzer\bin`, the following files should be listed (the numbers in the `av` `dll`s do matter; ensure the correct version of FFmpeg was downloaded):
+1. In `lcevc_stream_analyzer\bin`, the following files should be listed (the numbers in the `av` `dll`s do matter, ensure the correct version of FFmpeg was downloaded):
 
     ```txt
-    avfilter-10.dll
-    avformat-61.dll
-    avutil-59.dll
-    ffmpeg.exe
-    ffplay.exe
-    ffprobe.exe
-    swresample-5.dll
-    swscale-8.dll
-    avcodec-61.dll
-    avdevice-61.dll
+    avcodec-62.dll
+    avdevice-62.dll
+    avfilter-11.dll
+    avformat-62.dll
+    avutil-60.dll
+    swresample-6.dll
+    swscale-9.dll
     lcevc_stream_analyzer.exe
     ```
 
@@ -129,26 +127,33 @@ The CLI uses a subcommand model, quite similar to how tools such as `git` work. 
 Arguments either apply to the whole tool (global args) or to a subcommand (subcommand args).
 Providing no arguments or using `--help` flag prints out a list of global arguments and the available subcommands:
 
-```text
+```bash
 lcevc_stream_analyzer --help
+```
+
+```text
+lcevc_stream_analyzer 
+===================== 
+
+A suite of tools to analyze and inspect LCEVC-enhanced video streams. 
+
 
 ...
 
-OPTIONS
-          --version           Display program version information and exit
-  -h,     --help
-  -i,     --input TEXT:FILE REQUIRED
-                              Source video file
+OPTIONS:
+          --version           Display program version information and exit 
+  -h,     --help              Show help and exit 
+  -i,     --input TEXT:FILE REQUIRED 
+                              Source video file 
 ...
 
 SUBCOMMANDS:
-  analyze
-                              lcevc_stream_analyzer::analyze
-                              -> Output per-frame and summary stream info
-  extract
-                              lcevc_stream_analyzer::extract
-                              -> Extract LCEVC enhancement layer to file
-
+  ANALYZE                     
+                              lcevc_stream_analyzer::ANALYZE 
+                              -> Output per-frame and summary stream info 
+  EXTRACT                     
+                              lcevc_stream_analyzer::EXTRACT 
+                              -> Extract LCEVC enhancement layer to file 
 ...
 ```
 
@@ -187,7 +192,7 @@ lcevc_stream_analyzer --input <FILE> [global options] SUBCOMMAND [subcommand opt
 Or as a concrete example:
 
 ```txt
-lcevc_stream_analyzer --input a.mp4 --base_type h264 \   # global args
+lcevc_stream_analyzer --input a.mp4 --base-type h264 \   # global args
     ANALYZE --output stream.json \                       # ANALYZE args
     EXTRACT --output lcevc.bin                           # EXTRACT args
 ```
@@ -196,40 +201,40 @@ In the above example, the first `--output` is directed to the ANALYZE command, s
 
 ## Example Usage
 
-Analyze an MP4 input with verbose logging (input and base type auto-detected):
+Extract LCEVC from an elementary stream:
 
 ```
-lcevc_stream_analyzer --input input.mp4     ANALYZE --verbose 1
+lcevc_stream_analyzer --input input.es --base-type hevc     ANALYZE
 ```
 
-Extract LCEVC from a ES stream (must provide base type):
+Analyze an MP4 input with verbose logging:
 
 ```
-lcevc_stream_analyzer --input input.es --base-type vvc     analyze
+lcevc_stream_analyzer --input input.mp4 --base-type h264    ANALYZE --verbose 1
 ```
 
 Extract LCEVC from a TS stream with manual PID selection:
 
 ```
-lcevc_stream_analyzer --input input.ts --ts-pid 256     analyze
+lcevc_stream_analyzer --input input.ts --ts-pid 256     ANALYZE
 ```
 
 Analyze a raw H.264 SEI stream with specified base codec:
 
 ```
-lcevc_stream_analyzer --input stream_sei.ext --input-type sei --base-type h264     analyze
+lcevc_stream_analyzer --input stream_sei.ext --type sei --base-type h264     ANALYZE
 ```
 
 Generate JSON logs of LCEVC information:
 
 ```
-lcevc_stream_analyzer --input stream.mp4     ANALYZE --output logs/out.json
+lcevc_stream_analyzer --input stream.mp4 --base-type h264     ANALYZE --output logs/out.json
 ```
 
 Output LCEVC data to a .bin file:
 
 ```
-lcevc_stream_analyzer --input input.webm     EXTRACT --output output.bin
+lcevc_stream_analyzer --input input.ts --base-type vvc     EXTRACT --output output.bin
 ```
 
 Generate receive network buffer analysis output JSON (to pass in to plot tool):
@@ -246,7 +251,7 @@ lcevc_stream_analyzer --input input.mp4     ANALYZE --output stream.json     EXT
 
 ## Changelog
 
-See [CHANGELOG.md](https://github.com/v-novaltd/lcevc-stream-analyzer/blob/main/CHANGELOG.md)
+See [CHANGELOG.md](CHANGELOG.md)
 
 ## Known Issues
 
@@ -420,7 +425,7 @@ while more_data():
 Defines what type of block is present:
 
 | Value | Definition |
-|-||
+|-|-|
 | 0 | LCEVC Payload |
 
 #### block_size

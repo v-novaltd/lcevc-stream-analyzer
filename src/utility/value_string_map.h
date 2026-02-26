@@ -92,6 +92,15 @@ public:
         return strings;
     }
 
+    std::vector<T> ListValues() const
+    {
+        std::vector<T> values;
+        for (const ValueStringPair<T>& entry : m_pairs) {
+            values.push_back(entry.value);
+        }
+        return values;
+    }
+
 private:
     StringPairVec m_pairs;
 

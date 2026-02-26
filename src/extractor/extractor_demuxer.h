@@ -130,7 +130,7 @@ private:
     [[nodiscard]] bool storeLcevcFrame(helper::LCEVCFrame& lcevc);
     bool releaseLcevcFrame(std::vector<helper::LCEVCFrame>& lcevcFrames);
 
-    void determineStreamTypes();
+    bool determineStreamTypes();
     bool validateMp4IsNotAnnexB();
 
     helper::InputType m_inputType;

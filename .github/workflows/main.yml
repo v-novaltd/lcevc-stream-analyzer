@@ -1,5 +1,5 @@
 ##
-## Copyright (C) 2014-2025 V-Nova International Limited
+## Copyright (C) 2014-2026 V-Nova International Limited
 ##
 ##     * All rights reserved.
 ##     * This software is licensed under the BSD-3-Clause-Clear License.
@@ -32,8 +32,7 @@ on:
 env:
   BUILD_TYPE: Release
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   set-vars:
@@ -56,7 +55,9 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Run Lint Check
         run: |
@@ -73,7 +74,9 @@ jobs:
     needs: ["set-vars"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: CMake - Build
         run: |
@@ -95,7 +98,7 @@ jobs:
       - name: Upload
         env:
           ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-linux-x86_64"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
           path: ${{env.ARCHIVE}}.tar.gz
@@ -108,7 +111,9 @@ jobs:
     needs: ["set-vars"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: CMake - Build
         run: |
@@ -133,7 +138,7 @@ jobs:
       - name: Upload
         env:
           ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-macos-aarch64"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
           path: ${{env.ARCHIVE}}.tar.gz
@@ -146,10 +151,12 @@ jobs:
     needs: ["set-vars"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Build
-        shell: cmd
+        shell: cmd # zizmor: ignore[misfeature] can't load vcvars without cmd
         run: |
           md build
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
@@ -181,7 +188,7 @@ jobs:
       - name: Upload
         env:
           ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-windows-x86_64"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
           path: ${{env.ARCHIVE}}.zip
@@ -196,10 +203,12 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Build - Prepare MinGW
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2
         with:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-gcc cmake ninja
@@ -229,10 +238,12 @@ jobs:
       ]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Gather
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: release/
 

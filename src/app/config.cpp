@@ -42,7 +42,6 @@ namespace {
         const auto kInputTypeMap = EnumMap<InputType>
             (InputType::TS,  "TS")
             (InputType::ES, "ES")
-            (InputType::WEBM, "WEBM")
             (InputType::MP4, "MP4")
             (InputType::BIN, "BIN")
             (InputType::LCEVC, "LCEVC");
@@ -55,11 +54,7 @@ namespace {
         const auto kBaseTypeMap = EnumMap<helper::BaseType>
             ( helper::BaseType::H264, "H264" )
             ( helper::BaseType::HEVC, "HEVC" )
-            ( helper::BaseType::VVC, "VVC" )
-            ( helper::BaseType::VP8, "VP8" )
-            ( helper::BaseType::VP9, "VP9" )
-            ( helper::BaseType::AV1, "AV1" )
-            ( helper::BaseType::VC6, "VC6" );
+            ( helper::BaseType::VVC, "VVC" );
 
         const auto kLogFormatMap = EnumMap<LogFormat>
             ( LogFormat::TEXT, "LOG" )
@@ -101,10 +96,10 @@ namespace {
             case InputType::TS:
             case InputType::BIN:
             case InputType::LCEVC:
+            case InputType::MP4:
             case InputType::WEBM: return false;
             case InputType::ES:
-            case InputType::MP4:
-            case InputType::Unknown: return true;
+            case InputType::UNKNOWN: return true;
         }
         return true;
     }
@@ -113,6 +108,8 @@ namespace {
     {
         return (type != helper::BaseType::UNKNOWN && type != helper::BaseType::INVALID);
     }
+
+    bool inputTypeIsValid(helper::InputType type) { return (type != helper::InputType::UNKNOWN); }
 
     void makeParentDirectory(const std::filesystem::path& path)
     {
@@ -204,6 +201,48 @@ namespace {
 
 } // namespace
 
+bool checkInputTypeIsAllowed(helper::InputType type)
+{
+    if (inputTypeIsValid(type) == false) {
+        VNLOG_ERROR("Input video type value %s (%d) is not valid", toString(type), type);
+        return false;
+    }
+
+    auto validInputTypes = kInputTypeMap.ListValues();
+    const bool allowed =
+        (std::find(validInputTypes.begin(), validInputTypes.end(), type) != validInputTypes.end());
+    if (allowed) {
+        VNLOG_INFO("Using input video type %s (%d)", toString(type), type);
+    } else {
+        VNLOG_ERROR("Detected disallowed input video type %s (%d) - WEBM support "
+                    "is currently disabled",
+                    toString(type), type);
+    }
+
+    return allowed;
+}
+
+bool checkBaseTypeIsAllowed(helper::BaseType type)
+{
+    if (baseTypeIsValid(type) == false) {
+        VNLOG_ERROR("Base video type value %s (%d) is not valid", toString(type), type);
+        return false;
+    }
+
+    auto validBaseTypes = kBaseTypeMap.ListValues();
+    const bool allowed =
+        (std::find(validBaseTypes.begin(), validBaseTypes.end(), type) != validBaseTypes.end());
+    if (allowed) {
+        VNLOG_INFO("Using base video type %s (%d)", toString(type), type);
+    } else {
+        VNLOG_ERROR("Detected disallowed base video type %s (%d) - AV1, VP8, VP9, VC6 support "
+                    "is currently disabled",
+                    toString(type), type);
+    }
+
+    return allowed;
+}
+
 std::optional<const Config> parseArgs(int argc, char* argv[])
 {
     Config config;
@@ -240,15 +279,15 @@ std::optional<const Config> parseArgs(int argc, char* argv[])
 
     app.add_option("-t,--type", config.inputType,
                    "Source video file type - default: detected from file extension")
-        ->transform(CLI::CheckedTransformer(kInputTypeMap.NameToValueMap(InputType::Unknown),
+        ->transform(CLI::CheckedTransformer(kInputTypeMap.NameToValueMap(InputType::UNKNOWN),
                                             CLI::ignore_case));
 
-    app.add_option("-p,--ts_pid", config.tsPID, "Transport stream PID with LCEVC data [-1: auto detect]")
+    app.add_option("-p,--ts-pid", config.tsPID, "Transport stream PID with LCEVC data [-1: auto detect]")
         ->capture_default_str();
     app.add_option("--framerate", config.inputFramerate,
                    "Source video framerate - default: read from container");
     const auto* baseTypeOpt =
-        app.add_option("-b,--base_type", config.baseType,
+        app.add_option("-b,--base-type", config.baseType,
                        "Source video base codec - default: detected by parsing stream")
             ->transform(CLI::CheckedTransformer(kBaseTypeMap.NameToValueMap(helper::BaseType::UNKNOWN),
                                                 CLI::ignore_case));
@@ -328,7 +367,7 @@ std::optional<const Config> parseArgs(int argc, char* argv[])
     }
 
     using FileTypePair = std::pair<InputType, helper::BaseType>;
-    FileTypePair typesFromFileSuffix = {InputType::Unknown, helper::BaseType::INVALID};
+    FileTypePair typesFromFileSuffix = {InputType::UNKNOWN, helper::BaseType::INVALID};
 
     config.subcommand[Subcommand::ANALYZE] = analyzeCmd->parsed();
     config.subcommand[Subcommand::EXTRACT] = extractCmd->parsed();
@@ -352,12 +391,13 @@ std::optional<const Config> parseArgs(int argc, char* argv[])
     const std::string inputTypeName = config.inputPath.extension().string();
 
     // Try to deduce file types from input path extension
-    if (config.inputType == InputType::Unknown) {
+    if (config.inputType == InputType::UNKNOWN) {
         if (const auto foundType = kSupportedFileTypes.find(inputTypeName);
             foundType != kSupportedFileTypes.end()) {
             typesFromFileSuffix = foundType->second;
             config.inputType = typesFromFileSuffix.first;
-            VNLOG_DEBUG("Inferred file input type from filename");
+            VNLOG_DEBUG("Inferred file input type %s (%d) from filename",
+                        toString(config.inputType), config.inputType);
         } else {
             VNLOG_ERROR("Could not infer file type for \"%s\"", inputTypeName.c_str());
             VNLOG_ERROR(
@@ -368,24 +408,27 @@ std::optional<const Config> parseArgs(int argc, char* argv[])
             VNLOG_ERROR("");
         }
     }
-    VNLOG_INFO("Using file input type to %s (%d)", toString(config.inputType), config.inputType);
+
+    if (checkInputTypeIsAllowed(config.inputType) == false) {
+        return std::nullopt;
+    }
 
     DetectedInputFormat detectedFormat;
     const bool detectedFromContent = detectInputFormatFromFile(config.inputPath, detectedFormat);
-    if (detectedFromContent && detectedFormat.inputType != InputType::Unknown &&
-        config.inputType != InputType::Unknown && config.inputType != detectedFormat.inputType) {
+    if (detectedFromContent && detectedFormat.inputType != InputType::UNKNOWN &&
+        config.inputType != InputType::UNKNOWN && config.inputType != detectedFormat.inputType) {
         VNLOG_WARN(
             "Argument defined input type as %s (%d) but byte analysis proposed %s (%d) - check "
-            "file extension and -t/--input-type arg if used.",
+            "file extension and -t/--type arg if used.",
             toString(config.inputType), config.inputType, toString(detectedFormat.inputType),
             detectedFormat.inputType);
     }
 
-    if (config.inputType == InputType::Unknown && detectedFromContent) {
+    if (config.inputType == InputType::UNKNOWN && detectedFromContent) {
         config.inputType = detectedFormat.inputType;
     }
 
-    if (config.inputType == InputType::Unknown) {
+    if (config.inputType == InputType::UNKNOWN) {
         VNLOG_ERROR("Unrecognized input type [%s]", inputTypeName.c_str());
         return std::nullopt;
     }
@@ -408,7 +451,9 @@ std::optional<const Config> parseArgs(int argc, char* argv[])
     }
 
     if (baseTypeIsValid(config.baseType)) {
-        VNLOG_INFO("Using base video type %s (%d)", toString(config.baseType), config.baseType);
+        if (checkBaseTypeIsAllowed(config.baseType) == false) {
+            return std::nullopt;
+        }
     }
 
     if (extractCmd->parsed() && userSpecifiedOutputType && config.extractOutputPath.empty()) {

@@ -42,7 +42,7 @@ enum class InputType
     MP4,   // LCEVC is stored in a MP4 container
     BIN,   // LCEVC is stored in a BIN container
     LCEVC, // Raw LCEVC NAL units in Annex B format
-    Unknown
+    UNKNOWN
 };
 constexpr const char* toString(const InputType type)
 {
@@ -53,7 +53,7 @@ constexpr const char* toString(const InputType type)
         case InputType::MP4: return "MP4";
         case InputType::BIN: return "BIN";
         case InputType::LCEVC: return "LCEVC";
-        case InputType::Unknown: return "Unknown";
+        case InputType::UNKNOWN: return "Unknown";
         default: return "[FAILED TO CONVERT TO STRING]";
     }
 }
@@ -62,7 +62,7 @@ struct DetectedInputFormat
 {
     DetectedInputFormat() = default;
 
-    InputType inputType = InputType::Unknown;
+    InputType inputType = InputType::UNKNOWN;
     helper::BaseType baseType = helper::BaseType::INVALID;
     bool isLikelyAnnexB = false;
     bool isLikelyAvcc = false;

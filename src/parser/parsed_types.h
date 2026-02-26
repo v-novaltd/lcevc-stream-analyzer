@@ -455,8 +455,8 @@ struct GlobalConfig : public BaseConfig
     std::optional<std::array<uint16_t, 2>> custom_resolution = std::nullopt;
     uint8_t chroma_step_width_multiplier = 64;
 
-    // x_ members are outside the structure spec but are useful anyway. They should still be serialized in the JSON output.
-    std::array<uint16_t, 2> x_resolution = {0, 0};
+    // _ prefixed members are outside the structure spec but are useful anyway. They should still be serialized in the JSON output.
+    std::array<uint16_t, 2> _resolution = {0, 0};
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     GlobalConfig, type, size_type, size, processed_planes_type_flag, resolution_type,
@@ -466,7 +466,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
     temporal_enabled_flag, upsample_type, level1_filtering_signalled_flag, scaling_mode_level1,
     scaling_mode_level2, tile_dimensions_type, user_data_enabled, level1_depth_flag,
     chroma_step_width_flag, planes_type, adaptive_cubic_kernel_coeffs, level1_filtering,
-    custom_tile, compression_type, custom_resolution, chroma_step_width_multiplier, x_resolution);
+    custom_tile, compression_type, custom_resolution, chroma_step_width_multiplier, _resolution);
 
 struct PictureConfigSublayer1
 {
@@ -544,12 +544,12 @@ struct EncodedData : public BaseConfig
     {}
     std::vector<EncodedDataLayer> layers;
 
-    int64_t x_plane_count = 0;
-    int64_t x_coefficient_group_count = 0;
-    int64_t x_surface_header_bytes = 0;
+    int64_t _plane_count = 0;
+    int64_t _coefficient_group_count = 0;
+    int64_t _surface_header_bytes = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncodedData, type, size_type, size, layers, x_plane_count,
-                                   x_coefficient_group_count, x_surface_header_bytes);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncodedData, type, size_type, size, layers, _plane_count,
+                                   _coefficient_group_count, _surface_header_bytes);
 
 struct EncodedTileDataLayer : public EncodedDataLayer
 {
@@ -566,16 +566,16 @@ struct EncodedTileData : public BaseConfig
 
     std::vector<EncodedTileDataLayer> layers;
 
-    int64_t x_plane_count = 0;
-    int64_t x_coefficient_group_count = 0;
-    int64_t x_surface_header_bytes = 0;
-    std::array<int64_t, 2> x_tile_dimensions = {0, 0};
-    int64_t x_level1_tile_count = 0;
-    int64_t x_level2_tile_count = 0;
+    int64_t _plane_count = 0;
+    int64_t _coefficient_group_count = 0;
+    int64_t _surface_header_bytes = 0;
+    std::array<int64_t, 2> _tile_dimensions = {0, 0};
+    int64_t _level1_tile_count = 0;
+    int64_t _level2_tile_count = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncodedTileData, type, size_type, size, layers, x_plane_count,
-                                   x_coefficient_group_count, x_surface_header_bytes,
-                                   x_tile_dimensions, x_level1_tile_count, x_level2_tile_count);
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncodedTileData, type, size_type, size, layers, _plane_count,
+                                   _coefficient_group_count, _surface_header_bytes,
+                                   _tile_dimensions, _level1_tile_count, _level2_tile_count);
 
 struct AdditionalInfoSFilter
 {
@@ -716,7 +716,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(FrameLCEVC, frame_type, payload_size, raw_siz
 
 struct Frame
 {
-    FrameBase base;
+    std::optional<FrameBase> base;
     FrameLCEVC lcevc;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Frame, base, lcevc);
@@ -725,9 +725,9 @@ struct SummaryLCEVC
 {
     int64_t frame_count = 0;
     int64_t layer_size = 0;
-    int64_t level_1_size = 0.0;
-    int64_t level_2_size = 0.0;
-    int64_t temporal_size = 0.0;
+    int64_t level_1_size = 0;
+    int64_t level_2_size = 0;
+    int64_t temporal_size = 0;
     std::optional<double> layer_bitrate = 0;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SummaryLCEVC, frame_count, layer_size, level_1_size,
