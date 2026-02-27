@@ -16,38 +16,38 @@
 # THE EXCLUSION OF PATENT LICENSES PROVISION OF THE BSD-3-CLAUSE-CLEAR LICENSE.
 
 macro(DOWNLOAD_FFMPEG FFMPEG_DIR FFMPEG_VERSION)
-  # FFMPEG library configuration
-  if(APPLE)
+  if(NOT (WIN32 OR MSYS))
     message(FATAL_ERROR "Official pre-built libraries are not available for macOS.")
-
-  elseif(WIN32 OR MSYS)
-    set(FFMPEG_PLATFORM "win64")
-    set(FFMPEG_ARCHIVE_TYPE "zip")
-
-  elseif(UNIX)
-    set(FFMPEG_PLATFORM "linux64")
-    set(FFMPEG_ARCHIVE_TYPE "tar.xz")
-
   endif()
 
-  # Download and extract FFmpeg if not already present
   if(NOT EXISTS "${FFMPEG_DIR}/include")
-    set(FFMPEG_BASE_URL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/")
     set(FFMPEG_URL
-        "${FFMPEG_BASE_URL}ffmpeg-n${FFMPEG_VERSION}-latest-${FFMPEG_PLATFORM}-lgpl-shared-${FFMPEG_VERSION}.${FFMPEG_ARCHIVE_TYPE}"
+        https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/ffmpeg-${FFMPEG_VERSION}-full_build-shared.zip
     )
+
     message(STATUS "Downloading FFmpeg from ${FFMPEG_URL}")
 
-    file(DOWNLOAD "${FFMPEG_URL}" "${CMAKE_BINARY_DIR}/ffmpeg.${FFMPEG_ARCHIVE_TYPE}")
+    file(DOWNLOAD "${FFMPEG_URL}" "${CMAKE_BINARY_DIR}/ffmpeg.zip")
 
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_BINARY_DIR}/ffmpeg.${FFMPEG_ARCHIVE_TYPE}"
-      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_BINARY_DIR}/ffmpeg.zip"
+                    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
 
     file(GLOB EXTRACTED "${CMAKE_BINARY_DIR}/ffmpeg-*")
     list(GET EXTRACTED 0 EXTRACTED_DIR)
     file(RENAME "${EXTRACTED_DIR}" "${FFMPEG_DIR}")
-    file(REMOVE "${CMAKE_BINARY_DIR}/ffmpeg.${FFMPEG_ARCHIVE_TYPE}")
+    file(REMOVE "${CMAKE_BINARY_DIR}/ffmpeg.zip")
+
+    install(
+      DIRECTORY "${FFMPEG_DIR}/bin"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}"
+      FILES_MATCHING
+      PATTERN "*.dll")
+
+    install(
+      DIRECTORY "${FFMPEG_DIR}/bin"
+      DESTINATION "${CMAKE_INSTALL_PREFIX}"
+      FILES_MATCHING
+      PATTERN "*.exe")
 
   endif()
 endmacro()

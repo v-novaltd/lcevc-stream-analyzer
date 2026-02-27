@@ -1,5 +1,6 @@
 # Default build dir
 build/
+archive/
 
 # Test working folders
 test_cache/

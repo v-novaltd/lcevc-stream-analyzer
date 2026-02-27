@@ -37,88 +37,138 @@ LCEVC‑enhanced video streams.
 
 ## Quick Start
 
-### Linux
-
-1. Download the latest [`lcevc_stream_analyzer` release](https://github.com/v-novaltd/lcevc-stream-analyzer/releases/latest) archive for Linux.
-
-1. Unarchive, and install required ffmpeg libraries:
-
-    ```bash
-    # Create a working directory
-    mkdir "lcevc_stream_analyzer"
-    cd "lcevc_stream_analyzer"
-
-    # Extract the lcevc_stream_analyzer archive
-    tar -xvf ../lcevc_stream_analyzer*-linux-x86_64.tar.gz
-
-    # Download and extract pre-built ffmpeg archive
-    FFMPEG_ARCHIVE="ffmpeg-n8.0-latest-linux64-gpl-shared-8.0"
-    wget "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$FFMPEG_ARCHIVE.tar.xz"
-    tar -xvf "$FFMPEG_ARCHIVE.tar.xz" && rm "$FFMPEG_ARCHIVE.tar.xz"
-
-    # Copy the libav libraries to the binary directory
-    cp -r "$FFMPEG_ARCHIVE/lib/"* "build/install/bin/"
-
-    # Clean up
-    rm -rf "$FFMPEG_ARCHIVE/"
-
-    # Run the program
-    cd "build/install/bin/"
-    export LD_LIBRARY_PATH="$(pwd)/../lib:$LD_LIBRARY_PATH"
-    ./lcevc_stream_analyzer --help
-    ```
-
 ### Windows
 
 1. Download the latest [`lcevc_stream_analyzer` release](https://github.com/v-novaltd/lcevc-stream-analyzer/releases/latest) archive for Windows.
 
 1. Unzip the `.zip` file to a directory named `lcevc_stream_analyzer` or similar.
 
-1. Download pre-built ffmpeg v8.0 archive: [`ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip).
+1. Download pre-built ffmpeg v8.0 archive: [`ffmpeg-8.0-full_build-shared.zip`](https://github.com/GyanD/codexffmpeg/releases/download/8.0/ffmpeg-8.0-full_build-shared.zip).
 
-1. Open the `ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip` file in Windows Explorer.
+1. Open the `ffmpeg-8.0-full_build-shared.zip` file in Windows Explorer.
 
-1. Copy all files (including `.dll`s) from `ffmpeg-n8.0-latest-win64-gpl-shared-8.0\bin` to `lcevc_stream_analyzer\bin`.
+1. Copy all files (including `.dll`s) from `ffmpeg-8.0-full_build-shared\bin` to `lcevc_stream_analyzer\bin`.
 
 1. In `lcevc_stream_analyzer\bin`, the following files should be listed (the numbers in the `av` `dll`s do matter, ensure the correct version of FFmpeg was downloaded):
 
-    ```txt
-    avcodec-62.dll
-    avdevice-62.dll
-    avfilter-11.dll
-    avformat-62.dll
-    avutil-60.dll
-    swresample-6.dll
-    swscale-9.dll
-    lcevc_stream_analyzer.exe
-    ```
+   ```txt
+   avcodec-62.dll
+   avdevice-62.dll
+   avfilter-11.dll
+   avformat-62.dll
+   avutil-60.dll
+   swresample-6.dll
+   swscale-9.dll
+   lcevc_stream_analyzer.exe
+   ```
 
 1. Run the program from the `lcevc_stream_analyzer\bin` directory
 
-    ```cmd
-    lcevc_stream_analyzer --help
-    ```
+   ```cmd
+   lcevc_stream_analyzer --help
+   ```
+
+### Linux
+
+1. Download the latest [`lcevc_stream_analyzer` release](https://github.com/v-novaltd/lcevc-stream-analyzer/releases/latest) archive for Linux.
+
+1. In the terminal, from the directory where the lcevc_stream_analyzer tar file is located, unarchive, and build/install FFmpeg shared libraries from source:
+
+   ```bash
+   # Create a working directory
+   mkdir "lcevc_stream_analyzer"
+   cd "lcevc_stream_analyzer"
+
+   # Extract the lcevc_stream_analyzer archive
+   tar -xvf ../lcevc_stream_analyzer*-linux-x86_64.tar.gz
+
+   # Build FFmpeg 8.0 from source (aligned with cmake/build_ffmpeg.cmake)
+   FFMPEG_VERSION="8.0"
+   curl -L "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.gz" -o "ffmpeg-${FFMPEG_VERSION}.tar.gz"
+   tar -xvf "ffmpeg-${FFMPEG_VERSION}.tar.gz"
+   cd "ffmpeg-${FFMPEG_VERSION}"
+
+   ./configure \
+     --prefix="$(pwd)/../ffmpeg-install" \
+     --enable-shared \
+     --disable-static \
+     --disable-doc \
+     --enable-pic \
+     --extra-cflags=-fPIC \
+     --extra-ldflags=-fPIC \
+     --disable-asm \
+     --disable-x86asm \
+     --disable-openssl \
+     --disable-securetransport \
+     --disable-gnutls \
+     --disable-libsrt \
+     --disable-librtmp
+
+   make -j"$(getconf _NPROCESSORS_ONLN)"
+   make install
+   cd ..
+
+   # Make FFmpeg shared libs available to lcevc_stream_analyzer
+   mkdir -p build/install/lib/
+   cp -a ffmpeg-install/lib/lib*.so* build/install/lib/
+
+   # Run the program
+   cd "build/install/bin"
+   export LD_LIBRARY_PATH="$(pwd)/../lib:${LD_LIBRARY_PATH}"
+   ./lcevc_stream_analyzer --help
+   ```
 
 ### macOS
 
 1. Download the latest [`lcevc_stream_analyzer` release](https://github.com/v-novaltd/lcevc-stream-analyzer/releases/latest) archive for macOS.
 
-1. Unarchive, and install required ffmpeg libraries:
+> It is possible to run `brew install ffmpeg@8` and then run the stream analyzer without building ffmpeg from source, but this is not strictly supported as slight differences in parsing between ffmpeg versions and build methods have been noticed previously.
 
-    ```bash
-    # Install dependency
-    brew install ffmpeg
+1. Unarchive, and build/install FFmpeg v8.0 shared libraries from source:
 
-    # Create a working directory
-    mkdir "lcevc_stream_analyzer"
-    cd "lcevc_stream_analyzer"
+   ```bash
+   # Create a working directory
+   mkdir "lcevc_stream_analyzer"
+   cd "lcevc_stream_analyzer"
 
-    # Extract the lcevc_stream_analyzer archive
-    tar -xvf ../lcevc_stream_analyzer*-macos-aarch64.tar.gz
+   # Extract the lcevc_stream_analyzer archive
+   tar -xvf ../lcevc_stream_analyzer*-macos-aarch64.tar.gz
 
-    # Run the tool
-    ./build/install/bin/lcevc_stream_analyzer --help
-    ```
+   # Build FFmpeg 8.0 from source (aligned with cmake/build_ffmpeg.cmake)
+   FFMPEG_VERSION="8.0"
+   curl -L "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.gz" -o "ffmpeg-${FFMPEG_VERSION}.tar.gz"
+   tar -xvf "ffmpeg-${FFMPEG_VERSION}.tar.gz"
+   cd "ffmpeg-${FFMPEG_VERSION}"
+
+   ./configure \
+     --prefix="$(pwd)/../ffmpeg-install" \
+     --enable-shared \
+     --disable-static \
+     --disable-doc \
+     --enable-pic \
+     --extra-cflags=-fPIC \
+     --extra-ldflags=-fPIC \
+     --disable-asm \
+     --disable-x86asm \
+     --disable-openssl \
+     --disable-securetransport \
+     --disable-gnutls \
+     --disable-libsrt \
+     --disable-librtmp
+
+   make -j"$(sysctl -n hw.logicalcpu)"
+   make install
+   cd ..
+   
+   # Copy the libraries
+   mkdir -p build/install/lib/
+   cp -a ffmpeg-install/lib/lib*.dylib* build/install/lib/
+
+   # Run the tool
+   cd "build/install/bin"
+   export DYLD_LIBRARY_PATH="$(pwd)/../lib:${DYLD_LIBRARY_PATH}"
+   ./lcevc_stream_analyzer --help
+   ```
 
 ## CLI Interface
 
@@ -132,28 +182,28 @@ lcevc_stream_analyzer --help
 ```
 
 ```text
-lcevc_stream_analyzer 
-===================== 
+lcevc_stream_analyzer
+=====================
 
-A suite of tools to analyze and inspect LCEVC-enhanced video streams. 
+A suite of tools to analyze and inspect LCEVC-enhanced video streams.
 
 
 ...
 
 OPTIONS:
-          --version           Display program version information and exit 
-  -h,     --help              Show help and exit 
-  -i,     --input TEXT:FILE REQUIRED 
-                              Source video file 
+          --version           Display program version information and exit
+  -h,     --help              Show help and exit
+  -i,     --input TEXT:FILE REQUIRED
+                              Source video file
 ...
 
 SUBCOMMANDS:
-  ANALYZE                     
-                              lcevc_stream_analyzer::ANALYZE 
-                              -> Output per-frame and summary stream info 
-  EXTRACT                     
-                              lcevc_stream_analyzer::EXTRACT 
-                              -> Extract LCEVC enhancement layer to file 
+  ANALYZE
+                              lcevc_stream_analyzer::ANALYZE
+                              -> Output per-frame and summary stream info
+  EXTRACT
+                              lcevc_stream_analyzer::EXTRACT
+                              -> Extract LCEVC enhancement layer to file
 ...
 ```
 
@@ -285,10 +335,10 @@ There is no known resolution for streams of this nature. Interleaved streams enc
    and run `vs_BuildTools.exe`.
 2. In the installer, select `Desktop development with C++`.
 3. Ensure these components are selected:
-    - MSVC v14.x
-    - Windows 10/11 SDK
-    - CMake tools
-    - Include ATL and MFC for latest v14.x tools (optional).
+   - MSVC v14.x
+   - Windows 10/11 SDK
+   - CMake tools
+   - Include ATL and MFC for latest v14.x tools (optional).
 
 #### Alternative: MSYS2-based Build Environment
 
@@ -296,71 +346,60 @@ There is no known resolution for streams of this nature. Interleaved streams enc
 
 2. Install Required Packages - choose either of the following environments:
 
-    a. _UCRT64 Environment (Recommended)_: Open the MSYS2 UCRT64 terminal and
-    run:
+   a. _UCRT64 Environment (Recommended)_: Open the MSYS2 UCRT64 terminal and
+   run:
 
-    ```bash
-    pacman -S git mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-cmake
-    ```
+   ```bash
+   pacman -S git mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-cmake
+   ```
 
-    b. _MINGW64 Environment_: Open the MSYS2 MinGW64 terminal and run:
+   b. _MINGW64 Environment_: Open the MSYS2 MinGW64 terminal and run:
 
-    ```bash
-    pacman -S git mingw-w64-x86_64-clang mingw-w64-x86_64-cmake
-    ```
+   ```bash
+   pacman -S git mingw-w64-x86_64-clang mingw-w64-x86_64-cmake
+   ```
 
 ### Debian/Ubuntu based Linux - tested on Ubuntu 22.04 x86_64
 
 ```bash
 sudo apt update
-sudo apt install git
-sudo apt install cmake
-sudo apt install build-essential
-sudo apt install libgtest-dev # optional, for unit tests only
+sudo apt install -y git build-essential cmake
 ```
 
 ### macOS - tested on macOS 15 arm64
 
 ```bash
-# Install Homebrew (if not already installed) - https://brew.sh/
-
-brew install cmake
-brew install git
-brew install pkgconf
-brew install ffmpeg
-brew install aom
-brew install googletest # optional, for unit tests only
+# Install Homebrew, if not already installed - https://brew.sh/
+brew install clang cmake git
 ```
 
 ### Build Options
 
-- `VN_BUILD_BINARIES`: build the `StreamAnalyzer` executable (default: ON)
-- `VN_FFMPEG_DOWNLOAD`: download prebuilt FFmpeg/libav as a fallback (default:
-  ON)
-- `VN_BUILD_UNIT_TESTS`: build unit test executables (default: OFF)
+- `VN_BUILD_BINARIES`: build `lcevc_stream_analyzer` (default: ON)
+- `VN_FFMPEG_DOWNLOAD`: download FFmpeg/libav source and build (default: ON)
+- `VN_GTEST_DOWNLOAD`: download gtest source and build (default: ON, used when `VN_BUILD_UNIT_TESTS=ON`)
+- `VN_BUILD_UNIT_TESTS`: build unit tests (default: ON)
 
 ### Build Instructions
 
-> On Windows, make sure the following is called from a developer Powershell prompt.
+> On Windows, make sure the following is called from a developer PowerShell prompt.
 
 ```bash
 git clone https://github.com/v-novaltd/lcevc-stream-analyzer.git -b main
 cd lcevc-stream-analyzer
 
-cmake -S . -B build -DCMAKE_INSTALL_PREFIX=build/install
-cmake --build build --config Release
-cmake --install build --config Release
+cmake --workflow --preset Release
 
 # Linux only - find dynamic libraries at runtime
-export LD_LIBRARY_PATH=$(pwd)/build/install/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$(pwd)/build/Release/install/lib:$LD_LIBRARY_PATH
 ```
 
 ### Running Unit Tests
 
+After building, you can run unit tests like so.
+
 ```bash
-cmake -S . -B build -DVN_BUILD_UNIT_TESTS=ON -DVN_BUILD_BINARIES=OFF
-cmake --build build --config Release
-ctest --test-dir build --output-on-failure
+ctest --preset Release --output-on-failure
 ```
 
 ## Elementary Formats
@@ -424,9 +463,9 @@ while more_data():
 
 Defines what type of block is present:
 
-| Value | Definition |
-|-|-|
-| 0 | LCEVC Payload |
+| Value | Definition    |
+| ----- | ------------- |
+| 0     | LCEVC Payload |
 
 #### block_size
 

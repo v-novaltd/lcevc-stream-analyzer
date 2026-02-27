@@ -25,6 +25,7 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     tags:
       - "*"
@@ -80,28 +81,21 @@ jobs:
 
       - name: CMake - Build
         run: |
-          cmake -S . -B build -DCMAKE_INSTALL_PREFIX=build/install
-          cmake --build build --config Release
-          cmake --install build --config Release
+          cmake --workflow --preset Release
+          ctest --preset Release
 
       - name: Execute
         run: |
-          export LD_LIBRARY_PATH=$(pwd)/build/install/lib:$LD_LIBRARY_PATH
-          ./build/install/bin/lcevc_stream_analyzer --version
-
-      - name: Archive
-        env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-linux-x86_64"
-        run: |
-          tar -cvf $ARCHIVE.tar.gz build/install/bin/lcevc_stream_analyzer third_party/LICENSES LICENSE COPYING
+          export LD_LIBRARY_PATH=$(pwd)/build/Release/install/lib:$LD_LIBRARY_PATH
+          ./build/Release/install/bin/lcevc_stream_analyzer --version
 
       - name: Upload
         env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-linux-x86_64"
+          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-Release-Linux-x86_64"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
-          path: ${{env.ARCHIVE}}.tar.gz
+          path: archive/${{env.ARCHIVE}}.tar.gz
 
   build-macos:
     name: Build - macOS
@@ -117,31 +111,21 @@ jobs:
 
       - name: CMake - Build
         run: |
-          echo $ARCHIVE
-          brew install cmake
-          brew install git
-          brew install pkgconf
-          brew install ffmpeg
-          brew install aom
-          brew install googletest
+          cmake --workflow --preset Release
+          ctest --preset Release
 
-          cmake -S . -B build -DCMAKE_INSTALL_PREFIX=build/install
-          cmake --build build --config Release
-          cmake --install build --config Release
-
-      - name: Archive
-        env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-macos-aarch64"
+      - name: Execute
         run: |
-          tar -cvf $ARCHIVE.tar.gz build/install/bin/lcevc_stream_analyzer third_party/LICENSES LICENSE COPYING
+          export DYLD_LIBRARY_PATH=$(pwd)/build/Release/install/lib:$DYLD_LIBRARY_PATH
+          ./build/Release/install/bin/lcevc_stream_analyzer --version
 
       - name: Upload
         env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-macos-aarch64"
+          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-Release-Darwin-arm64"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
-          path: ${{env.ARCHIVE}}.tar.gz
+          path: archive/${{env.ARCHIVE}}.tar.gz
 
   build-windows-msvc:
     name: Build - Windows MSVC
@@ -160,30 +144,12 @@ jobs:
         run: |
           md build
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cmake -S . -B build -DCMAKE_INSTALL_PREFIX=build/install
-          cmake --build build --config Release
-          cmake --install build --config Release
+          cmake --workflow --preset Release
+          ctest --preset Release
 
       - name: Execute
         run: |
-          build\install\bin\lcevc_stream_analyzer.exe --version
-
-      - name: Archive
-        shell: powershell
-        env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-windows-x86_64"
-        run: |
-          mkdir archive
-          cp LICENSE archive\
-          cp COPYING archive\
-
-          mkdir archive\third_party\
-          cp -r third_party\LICENSES archive\third_party\
-
-          mkdir archive\bin
-          cp build\install\bin\lcevc_stream_analyzer.exe archive\bin\
-
-          Compress-Archive -Path archive\* -DestinationPath "$env:ARCHIVE.zip"
+          build\Release\install\bin\lcevc_stream_analyzer.exe --version
 
       - name: Upload
         env:
@@ -191,7 +157,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
-          path: ${{env.ARCHIVE}}.zip
+          path: archive/${{env.ARCHIVE}}.zip
 
   build-windows-mingw:
     name: Build - Windows MinGW
@@ -211,18 +177,17 @@ jobs:
         uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2
         with:
           msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-gcc cmake ninja
+          install: mingw-w64-ucrt-x86_64-gcc cmake
 
       - name: Build - CMake
         run: |
-          mkdir build
-          cmake -G Ninja -S . -B build -DCMAKE_INSTALL_PREFIX=build/install
-          cmake --build build --config Release
-          cmake --install build --config Release
+          cmake --workflow --preset Release
+          ctest --preset Release
 
       - name: Execute
         run: |
-          ./build/install/bin/lcevc_stream_analyzer --version
+          export LD_LIBRARY_PATH=$(pwd)/build/Release/install/lib:$LD_LIBRARY_PATH
+          ./build/Release/install/bin/lcevc_stream_analyzer --version
 
   release:
     name: Release

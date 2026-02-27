@@ -22,6 +22,11 @@ macro(download_gtest)
   endif()
 
   include(FetchContent)
+
+  set(INSTALL_GTEST
+      OFF
+      CACHE BOOL "" FORCE)
+
   FetchContent_Declare(
     googletest # Specify the commit you depend on and update it regularly.
     URL https://github.com/google/googletest/archive/5376968f6948923e2411081fd9372e71a59d8e77.zip)
