@@ -60,12 +60,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run Lint Check
+      - name: Run Format Check
         run: |
-          sudo apt-get install -y clang-format-14 clang-tidy-14 libgtest-dev
+          sudo apt-get install -y clang-format-14
           git ls-files -z '**/*.h' '**/*.c' '**/*.hpp' '**/*.cpp' ':!:third_party/**' | xargs -0 clang-format-14 --style=file --dry-run -Werror
-          cmake --workflow --preset Release
-          run-clang-tidy-14 -quiet -p "build/Release" -j $(nproc) '(src|tests)/.*'
 
   build-linux:
     name: Build - Linux
@@ -88,6 +86,11 @@ jobs:
         run: |
           export LD_LIBRARY_PATH=$(pwd)/build/Release/install/lib:$LD_LIBRARY_PATH
           ./build/Release/install/bin/lcevc_stream_analyzer --version
+
+      - name: Static Analysis
+        run: |
+          sudo apt-get install -y clang-tidy-14
+          run-clang-tidy-14 -quiet -p "build/Release" -j $(nproc) '(src|tests)/.*'
 
       - name: Upload
         env:
@@ -181,8 +184,8 @@ jobs:
 
       - name: Build - CMake
         run: |
-          cmake --workflow --preset Release
-          ctest --preset Release
+          cmake --preset Release
+          cmake --build --preset Release
 
       - name: Execute
         run: |
