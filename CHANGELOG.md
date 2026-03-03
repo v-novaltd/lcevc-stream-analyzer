@@ -23,6 +23,17 @@ BSD-3-CLAUSE-CLEAR LICENSE.
 
 # Changelog
 
+## 2.1.2
+
+### Fixes
+
+- Fix elementary stream handling by changing ffmpeg dependency method as the BtbN binaries exhibit different behaviour to other methods.
+
+### Dependencies / Compatibility
+
+- Change to building ffmpeg from source on Linux/macOS
+- Change to using gyan.dev pre-built ffmpeg libraries on Windows
+
 ## 2.1.0
 
 ### Breaking Changes

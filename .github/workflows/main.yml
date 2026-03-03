@@ -64,8 +64,8 @@ jobs:
         run: |
           sudo apt-get install -y clang-format-14 clang-tidy-14 libgtest-dev
           git ls-files -z '**/*.h' '**/*.c' '**/*.hpp' '**/*.cpp' ':!:third_party/**' | xargs -0 clang-format-14 --style=file --dry-run -Werror
-          cmake -S . -B build -DCMAKE_INSTALL_PREFIX=build/install -DVN_BUILD_UNIT_TESTS=ON
-          run-clang-tidy-14 -p build -j $(nproc)
+          cmake --workflow --preset Release
+          run-clang-tidy-14 -quiet -p "build/Release" -j $(nproc) '(src|tests)/.*'
 
   build-linux:
     name: Build - Linux
@@ -153,7 +153,7 @@ jobs:
 
       - name: Upload
         env:
-          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-windows-x86_64"
+          ARCHIVE: "lcevc_stream_analyzer-${{needs.set-vars.outputs.VERSION}}-Release-Windows-AMD64"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{env.ARCHIVE}}
@@ -177,7 +177,7 @@ jobs:
         uses: msys2/setup-msys2@4f806de0a5a7294ffabaff804b38a9b435a73bda # v2
         with:
           msystem: UCRT64
-          install: mingw-w64-ucrt-x86_64-gcc cmake
+          install: mingw-w64-ucrt-x86_64-gcc cmake make
 
       - name: Build - CMake
         run: |
